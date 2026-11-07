@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Architect-Typist local state
+.state/*
+!.state/conventions.md
+!.state/maintain/
+!.state/maintain/**
