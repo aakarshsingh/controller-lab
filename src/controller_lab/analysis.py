@@ -187,3 +187,155 @@ def button_presses(masks: np.ndarray) -> int:
         return 0
     rising = np.concatenate(([m[0]], m[1:] & ~m[:-1]))
     return sum(int(v).bit_count() for v in rising)
+
+
+# ---- sticks ----------------------------------------------------------------
+
+PUSH_RADIUS = 0.8  # a centring push counts once the stick passes this
+RELEASE_RADIUS = 0.3  # and is released once it comes back inside this
+SETTLE_NS = 300 * NS_PER_MS
+RIM_RADIUS = 0.5  # circle samples inside this are ignored
+CIRCLE_BIN_DEG = 5
+AXIS_WINDOW_DEG = 10
+
+
+def _angles(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Angle in degrees from 0 to 360, counter-clockwise from right, with up as 90."""
+    return np.degrees(np.arctan2(-np.asarray(y, float), np.asarray(x, float))) % 360
+
+
+def snapback(
+    t_ns: np.ndarray, x: np.ndarray, y: np.ndarray, settle_ns: int = SETTLE_NS
+) -> tuple[float, float] | None:
+    """Settle offset and opposite-direction spike for one push, both as % of full.
+
+    The push direction is where the stick was furthest out. Release is the first
+    sample after that back inside 30%. The spike is the furthest the stick swings
+    past centre the other way within `settle_ns`, and the settle offset is where it
+    rests `settle_ns` after release. None when the push or release didn't happen.
+    """
+    t = np.asarray(t_ns, dtype=np.int64)
+    xf, yf = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    r = np.hypot(xf, yf)
+    if r.size == 0:
+        return None
+    peak = int(np.argmax(r))
+    if r[peak] < PUSH_RADIUS * AXIS_MAX:
+        return None
+    after = np.flatnonzero(r[peak:] < RELEASE_RADIUS * AXIS_MAX)
+    if after.size == 0:
+        return None
+    rel = peak + int(after[0])
+    ux, uy = xf[peak] / r[peak], yf[peak] / r[peak]
+    window = (t >= t[rel]) & (t <= t[rel] + settle_ns)
+    spike = max(0.0, float(np.max(-(xf[window] * ux + yf[window] * uy))))
+    settle = int(np.searchsorted(t, t[rel] + settle_ns, side="right")) - 1
+    return float(r[settle]) / AXIS_MAX * 100, spike / AXIS_MAX * 100
+
+
+@dataclass(frozen=True)
+class CircleStats:
+    error_pct: float
+    weakest: str
+    lr_diff_pct: float
+    ud_diff_pct: float
+    bins_covered: int
+
+
+def circle_stats(x: np.ndarray, y: np.ndarray) -> CircleStats:
+    """Circle error from stick samples pressed against the rim.
+
+    Each 5° bin keeps the furthest reach in it, as a fraction of full. Circle error is
+    the mean distance of those reaches from a perfect circle. The weakest direction
+    is the 45° sector with the lowest mean reach. The reach differences compare
+    right against left and up against down, within 10° of each axis.
+    """
+    xf, yf = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    r = np.hypot(xf, yf) / AXIS_MAX
+    rim = r > RIM_RADIUS
+    nan = float("nan")
+    if not rim.any():
+        return CircleStats(nan, "", nan, nan, 0)
+    deg, r = _angles(xf[rim], yf[rim]), r[rim]
+    n_bins = 360 // CIRCLE_BIN_DEG
+    bins = (deg // CIRCLE_BIN_DEG).astype(int) % n_bins
+    reach = np.full(n_bins, np.nan)
+    np.fmax.at(reach, bins, r)
+    covered = ~np.isnan(reach)
+    centres = (np.arange(n_bins) + 0.5) * CIRCLE_BIN_DEG
+
+    def mean_reach(around: float, half_width: float) -> float:
+        dist = np.abs((centres - around + 180) % 360 - 180)
+        sel = covered & (dist <= half_width)
+        return float(reach[sel].mean()) if sel.any() else nan
+
+    sectors = [mean_reach(k * 45, 22.5) for k in range(8)]
+    known = [(v, k) for k, v in enumerate(sectors) if not np.isnan(v)]
+    weakest = DIRECTIONS[min(known)[1]] if known else ""
+    w = AXIS_WINDOW_DEG
+    return CircleStats(
+        error_pct=float(np.abs(reach[covered] - 1.0).mean()) * 100,
+        weakest=weakest,
+        lr_diff_pct=(mean_reach(0, w) - mean_reach(180, w)) * 100,
+        ud_diff_pct=(mean_reach(90, w) - mean_reach(270, w)) * 100,
+        bins_covered=int(covered.sum()),
+    )
+
+
+def sweep_stats(values: np.ndarray) -> tuple[int, int, float]:
+    """Distinct values, distinct values within ±10% of centre, and the max jump in %."""
+    v = np.asarray(values, dtype=np.int64)
+    if v.size == 0:
+        return 0, 0, float("nan")
+    distinct = np.unique(v)
+    near = int((np.abs(distinct) <= 0.1 * AXIS_MAX).sum())
+    jump = float(np.abs(np.diff(v)).max()) / AXIS_MAX * 100 if v.size > 1 else 0.0
+    return int(distinct.size), near, jump
+
+
+def trigger_stats(values: np.ndarray) -> tuple[int, float, int, float]:
+    """Rest value, max reach in %, distinct values, and the max jump in %."""
+    v = np.asarray(values, dtype=np.int64)
+    if v.size == 0:
+        return 0, float("nan"), 0, float("nan")
+    jump = float(np.abs(np.diff(v)).max()) / AXIS_MAX * 100 if v.size > 1 else 0.0
+    return int(v[0]), float(v.max()) / AXIS_MAX * 100, int(np.unique(v).size), jump
+
+
+# ---- buttons and D-pad ----------------------------------------------------
+
+CHATTER_NS = 10 * NS_PER_MS
+
+
+def press_train(t_ns: np.ndarray, pressed: np.ndarray) -> tuple[int, int]:
+    """Presses, and chatter: presses or gaps between presses shorter than 10 ms."""
+    t = np.asarray(t_ns, dtype=np.int64)
+    p = np.asarray(pressed, dtype=bool)
+    if p.size == 0:
+        return 0, 0
+    change = np.flatnonzero(np.diff(p.astype(np.int8)) != 0) + 1
+    edges_t, edges_v = t[change], p[change]
+    presses = int(edges_v.sum()) + int(p[0])
+    # Every stretch between two edges is a press or a gap. The first and last are open.
+    chatter = int((np.diff(edges_t) < CHATTER_NS).sum())
+    return presses, chatter
+
+
+def _rising(masks: np.ndarray) -> np.ndarray:
+    m = np.asarray(masks, dtype=np.int64)
+    if m.size == 0:
+        return m
+    return np.concatenate(([m[0]], m[1:] & ~m[:-1]))
+
+
+def dpad_ghosts(masks: np.ndarray, neighbours: int) -> int:
+    """Presses of the neighbouring D-pad directions while one direction is tapped."""
+    return sum(int(v & neighbours).bit_count() for v in _rising(masks))
+
+
+def diagonal_presses(masks: np.ndarray, pair: int) -> int:
+    """Times both directions of a diagonal came down together."""
+    both = (np.asarray(masks, dtype=np.int64) & pair) == pair
+    if both.size == 0:
+        return 0
+    return int(both[0]) + int((both[1:] & ~both[:-1]).sum())

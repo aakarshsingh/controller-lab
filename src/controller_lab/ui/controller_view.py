@@ -28,6 +28,7 @@ FACE_COLOURS = {
     "Y": (246, 197, 32),
 }
 DARK = (28, 30, 35)
+FOCUS = (246, 197, 32)  # ring round the control in use
 
 _fonts: dict[int, pygame.font.Font] = {}
 
@@ -43,7 +44,36 @@ def _pressed(mask: int, name: str) -> bool:
     return bool(mask >> BIT[name] & 1)
 
 
-def draw_controller(surface: pygame.Surface, origin: tuple[int, int], snap: Snapshot) -> None:
+def _focus_shapes(ox: int, oy: int) -> dict[str, tuple[str, tuple]]:
+    """Where each control sits, for the ring drawn round the one in use."""
+    width = SIZE[0]
+    fx, fy = ox + 745, oy + 95
+    face = {"Y": (0, -1), "X": (-1, 0), "B": (1, 0), "A": (0, 1)}
+    shapes: dict[str, tuple[str, tuple]] = {
+        "LS": ("circle", ((ox + 145, oy + 105), STICK_R + 7)),
+        "RS": ("circle", ((ox + 585, oy + 145), STICK_R + 7)),
+        "LT": ("rect", (ox + 12, oy + 34, 34, 172)),
+        "RT": ("rect", (ox + width - 46, oy + 34, 34, 172)),
+        "LB": ("rect", (ox + 64, oy + 4, 162, 36)),
+        "RB": ("rect", (ox + width - 226, oy + 4, 162, 36)),
+        "Back": ("circle", ((ox + 395, oy + 80), 19)),
+        "Start": ("circle", ((ox + 485, oy + 80), 19)),
+        "D-pad": ("rect", (ox + 257, oy + 107, 86, 86)),
+    }
+    for name, (dx, dy) in face.items():
+        shapes[name] = ("circle", ((fx + dx * FACE_GAP, fy + dy * FACE_GAP), FACE_R + 6))
+    for name in ("Up", "Down", "Left", "Right"):
+        shapes[name] = shapes["D-pad"]
+    return shapes
+
+
+def draw_controller(
+    surface: pygame.Surface,
+    origin: tuple[int, int],
+    snap: Snapshot,
+    focus: str | None = None,
+) -> None:
+    """Draw the controller. `focus` names a control, such as "RS" or "A", to ring."""
     ox, oy = origin
     width, height = SIZE
     panel(surface, (ox, oy, width, height))
@@ -60,6 +90,14 @@ def draw_controller(surface: pygame.Surface, origin: tuple[int, int], snap: Snap
     _small(surface, (ox + 395, oy + 80), "View", _pressed(mask, "Back"))
     _small(surface, (ox + 485, oy + 80), "Menu", _pressed(mask, "Start"))
     _face(surface, (ox + 745, oy + 95), mask)
+
+    shape = _focus_shapes(ox, oy).get(focus) if focus else None
+    if shape is not None:
+        kind, args = shape
+        if kind == "circle":
+            pygame.draw.circle(surface, FOCUS, args[0], args[1], 3)
+        else:
+            pygame.draw.rect(surface, FOCUS, args, 3, border_radius=10)
 
 
 def _stick(

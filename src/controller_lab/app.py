@@ -16,7 +16,7 @@ from pygame._sdl2 import controller
 
 from controller_lab import devtree, history, rig
 from controller_lab.checks import registry
-from controller_lab.checks.base import Check, CheckData, Outcome, Phase
+from controller_lab.checks.base import INTRO_S, Check, CheckData, EndCondition, Outcome, Phase
 from controller_lab.detect import ControllerInfo, controller_info
 from controller_lab.devtree import DeviceInfo
 from controller_lab.rig import RigResult
@@ -128,6 +128,9 @@ class App:
         self.recorder: Recorder | None = None
         self.phase_index = 0
         self.phase_starts: list[int] = []
+        self.phase_end: EndCondition | None = None
+        # A phase with an intro starts counting only once its get-ready banner is over.
+        self.counting_from = 0
         self.outcome: Outcome | None = None
         self.end_at = 0
         # Paused: why, and what to do once the controller is confirmed
@@ -537,13 +540,20 @@ class App:
         self.results.pop(check.id, None)
         self.recorder = Recorder(timing=check.is_timing)
         self.phase_index = 0
-        self.phase_starts = [time.perf_counter_ns()]
+        self.phase_starts = []
+        self.start_phase(time.perf_counter_ns())
         self.outcome = None
         self.go(Screen.CHECK)
 
     def tick_check(self, now: int) -> None:
-        phase, elapsed = self.phase, now - self.phase_starts[-1]
-        ended = phase.end is not None and self.snap is not None and phase.end(self.snap)
+        if now < self.counting_from:
+            return
+        phase, elapsed = self.phase, now - self.counting_from
+        snap = self.snap
+        ended = snap is not None and (
+            (phase.end is not None and phase.end(snap))
+            or (self.phase_end is not None and self.phase_end(now, snap))
+        )
         if ended or (phase.duration_s is not None and elapsed >= phase.duration_s * 1e9):
             self.next_phase(now)
         elif elapsed >= phase.timeout_s * 1e9:
@@ -557,8 +567,15 @@ class App:
         if self.phase_index == len(self.check.phases):
             self.finish_check(now, timed_out=False)
         else:
-            self.phase_starts.append(now)
+            self.start_phase(now)
             self.last_frame = 0
+
+    def start_phase(self, now: int) -> None:
+        """Begin the current phase, with a fresh end condition when it counts something."""
+        self.phase_starts.append(now)
+        self.counting_from = now + (int(INTRO_S * 1e9) if self.phase.intro else 0)
+        until = self.phase.until
+        self.phase_end = until(self.counting_from) if until is not None else None
 
     def finish_check(self, now: int, timed_out: bool) -> None:
         rec, self.recorder = self.recorder, None
@@ -634,7 +651,7 @@ class App:
         """Seconds left in the phase, and the fraction done."""
         phase = self.phase
         limit = phase.duration_s if phase.duration_s is not None else phase.timeout_s
-        elapsed = (now - self.phase_starts[-1]) / 1e9
+        elapsed = max(0, now - self.counting_from) / 1e9
         return max(0.0, limit - elapsed), min(1.0, elapsed / limit)
 
     def render_timing(self, now: int) -> None:
@@ -666,8 +683,10 @@ class App:
             self.phase,
             self.check_index,
             len(self.checks),
+            self.phase_index,
             left,
             fraction,
+            max(0, self.counting_from - now) / 1e9,
             None if self.check.is_timing else self.snap,
         )
 

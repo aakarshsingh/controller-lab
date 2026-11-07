@@ -6,17 +6,19 @@ the bottom right that names what A does, and the secondary keys small at the bot
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pygame
 
+from controller_lab.analysis import DIRECTIONS
 from controller_lab.checks.base import Check, Outcome, Phase
 from controller_lab.detect import ControllerInfo
 from controller_lab.rig import RigResult
 from controller_lab.source import Snapshot
-from controller_lab.ui.controller_view import draw_controller
+from controller_lab.ui.controller_view import FACE_COLOURS, draw_controller
 from controller_lab.ui.draw import BG, GREEN, GREY, PANEL, RED, WHITE, panel, text
 
 WIDTH = 960
@@ -26,6 +28,7 @@ PRIMARY_SIZE = 32
 PRIMARY_TOP = 500
 PRIMARY_PAD = (22, 12)
 HINT_POS = (MARGIN, 568)
+HINT_GAP = "    "
 VIEW_ORIGIN = (MARGIN, 268)
 PROGRESS_RECT = pygame.Rect(MARGIN, 222, WIDTH - 2 * MARGIN, 26)
 LABEL_ROWS = 7
@@ -53,14 +56,22 @@ STATUS_TEXT = {
 }
 CHECK_HINTS = "B / S  skip    R  redo    Esc  quit"
 END_METRICS = 8
+END_LINES = 10
+INTRO_COLOUR = (246, 197, 32)
+ARROW_CENTRE = (WIDTH - MARGIN - 50, 175)
+ARROW_R = 34
 
 _fonts: dict[int, pygame.font.Font] = {}
 
 
-def _width(s: str, size: int) -> int:
+def _font(size: int) -> pygame.font.Font:
     if size not in _fonts:
         _fonts[size] = pygame.font.Font(None, size)
-    return _fonts[size].size(s)[0]
+    return _fonts[size]
+
+
+def _width(s: str, size: int) -> int:
+    return _font(size).size(s)[0]
 
 
 def _wrap_path(path: str, size: int, width: int) -> list[str]:
@@ -88,11 +99,56 @@ def _frame(s: pygame.Surface, step: int, primary: str, hints: str) -> None:
         panel(s, (x0 + i * (seg_w + gap), 30, seg_w, 8), colour)
     if primary:
         pad_x, pad_y = PRIMARY_PAD
-        w = _width(primary, PRIMARY_SIZE) + 2 * pad_x
+        w = _keys_width(primary, PRIMARY_SIZE) + 2 * pad_x
         box = pygame.Rect(WIDTH - MARGIN - w, PRIMARY_TOP, w, PRIMARY_SIZE + 2 * pad_y - 8)
-        panel(s, box, GREEN)
-        text(s, primary, (box.x + pad_x, box.y + pad_y), PRIMARY_SIZE, BG)
-    text(s, hints, HINT_POS, 22, GREY)
+        panel(s, box, PANEL)
+        pygame.draw.rect(s, GREEN, box, 2, border_radius=6)
+        _keys_text(s, primary, (box.x + pad_x, box.y + pad_y), PRIMARY_SIZE, WHITE)
+    _keys_text(s, hints, HINT_POS, 22, GREY)
+
+
+def _glyph_r(size: int) -> int:
+    return round(size * 0.42)
+
+
+def _split_keys(line: str) -> list[tuple[str | None, str]]:
+    """Split a line of key hints into segments, each with its leading face button."""
+    parts = []
+    for seg in line.split(HINT_GAP):
+        head = seg.split(" ", 1)[0]
+        if head in FACE_COLOURS:
+            parts.append((head, seg[len(head) :]))
+        else:
+            parts.append((None, seg))
+    return parts
+
+
+def _keys_width(line: str, size: int) -> int:
+    width = 0
+    for i, (key, rest) in enumerate(_split_keys(line)):
+        width += _width(HINT_GAP, size) if i else 0
+        width += 2 * _glyph_r(size) + 2 if key else 0
+        width += _width(rest, size) if rest else 0
+    return width
+
+
+def _keys_text(
+    s: pygame.Surface, line: str, pos: tuple[int, int], size: int, colour: tuple[int, int, int]
+) -> None:
+    """Draw key hints, with A, B, X and Y as the controller's coloured buttons."""
+    x, y = pos
+    r = _glyph_r(size)
+    for i, (key, rest) in enumerate(_split_keys(line)):
+        x += _width(HINT_GAP, size) if i else 0
+        if key:
+            centre = (x + r, y + round(size * 0.34))
+            pygame.draw.circle(s, FACE_COLOURS[key], centre, r)
+            glyph = _font(round(size * 0.8)).render(key, True, BG)
+            s.blit(glyph, glyph.get_rect(center=centre))
+            x += 2 * r + 2
+        if rest:
+            text(s, rest, (x, y), size, colour)
+            x += _width(rest, size)
 
 
 def waiting(s: pygame.Surface, error: str) -> None:
@@ -245,14 +301,30 @@ def check(
     phase: Phase,
     index: int,
     total: int,
+    phase_index: int,
     seconds_left: float,
     fraction: float,
+    intro_left: float,
     snap: Snapshot | None,
 ) -> None:
-    """A running check. For a timing check this is drawn once, and only the bar refreshes."""
+    """A running check. For a timing check this is drawn once, and only the bar refreshes.
+
+    While `intro_left` is above zero, the phase's get-ready banner replaces the prompt.
+    """
     _frame(s, 5, "", CHECK_HINTS)
     _check_title(s, check, index, total)
+    parts = len(check.phases)
+    if parts > 1 and not check.is_timing:
+        text(s, f"{phase_index + 1} of {parts}", (WIDTH - MARGIN - 70, 76), 26, GREY)
+    if intro_left > 0:
+        text(s, phase.intro, (MARGIN, 112), 44, INTRO_COLOUR)
+        text(s, f"Get ready. Starts in {math.ceil(intro_left)} s.", (MARGIN, 165), 26, GREY)
+        if snap is not None and phase.visual == "controller":
+            draw_controller(s, VIEW_ORIGIN, snap, phase.focus)
+        return
     text(s, phase.prompt, (MARGIN, 112), 36)
+    if phase.arrow is not None:
+        _arrow(s, ARROW_CENTRE, phase.arrow)
     if check.is_timing:
         if phase.duration_s is None:
             note = f"Starts when the stick moves. Skipped after {phase.timeout_s:.0f} s."
@@ -269,7 +341,23 @@ def check(
     if done.width:
         panel(s, done, GREEN)
     if snap is not None and phase.visual == "controller":
-        draw_controller(s, VIEW_ORIGIN, snap)
+        draw_controller(s, VIEW_ORIGIN, snap, phase.focus)
+
+
+def _arrow(s: pygame.Surface, centre: tuple[int, int], direction: str) -> None:
+    """A large arrow pointing in one of the eight stick directions."""
+    k = DIRECTIONS.index(direction)
+    angle = math.radians(k * 45)
+    ux, uy = math.cos(angle), -math.sin(angle)  # screen y grows downwards
+    cx, cy = centre
+    pygame.draw.circle(s, PANEL, centre, ARROW_R + 8)
+    tip = (cx + ux * ARROW_R, cy + uy * ARROW_R)
+    tail = (cx - ux * ARROW_R * 0.6, cy - uy * ARROW_R * 0.6)
+    pygame.draw.line(s, GREEN, tail, tip, 6)
+    px, py = -uy, ux
+    base = (tip[0] - ux * 18, tip[1] - uy * 18)
+    head = [tip, (base[0] + px * 12, base[1] + py * 12), (base[0] - px * 12, base[1] - py * 12)]
+    pygame.draw.polygon(s, GREEN, head)
 
 
 def _metric_text(value: Any) -> str:
@@ -297,11 +385,16 @@ def check_end(
     text(s, status, (MARGIN, 112), 40, colour)
     if outcome.message:
         text(s, outcome.message, (MARGIN, 160), 28, RED if voided else GREY)
-    items = [(k, v) for k, v in outcome.metrics.items() if not isinstance(v, dict | list)]
-    for i, (name, value) in enumerate(items[:END_METRICS]):
-        x, y = MARGIN + (i % 2) * 440, 210 + (i // 2) * 30
-        text(s, name.replace("_", " "), (x, y), 22, GREY)
-        text(s, _metric_text(value), (x + 230, y), 22)
+    if outcome.lines:
+        for i, line in enumerate(outcome.lines[:END_LINES]):
+            x, y = MARGIN + (i % 2) * 440, 210 + (i // 2) * 34
+            text(s, line, (x, y), 28)
+    else:
+        items = [(k, v) for k, v in outcome.metrics.items() if not isinstance(v, dict | list)]
+        for i, (name, value) in enumerate(items[:END_METRICS]):
+            x, y = MARGIN + (i % 2) * 440, 210 + (i // 2) * 30
+            text(s, name.replace("_", " "), (x, y), 22, GREY)
+            text(s, _metric_text(value), (x + 230, y), 22)
     if not voided:
         after = "Results" if last else "Next check"
         text(s, f"{after} in {seconds_left:.0f} s", (MARGIN, 450), 24, GREY)

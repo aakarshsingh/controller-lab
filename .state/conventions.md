@@ -164,3 +164,10 @@
   state change at all in 30 s, so idle drift had 1 sample and read noise 0.00. Left
   rested at 1.82% up and right at 2.25% up-left. Noise from state changes only shows
   when the value moves, so a zero is a real reading, not a fault in the check.
+- First hand run of Phase 4's stick checks on Black over USB, 2026-11-07: circle error
+  5.87% left and 6.45% right, against Gamepadla's 7.9%. Both triggers reach 100% from
+  rest 0. Centring snapback spikes reached 24.8% on the right stick.
+- Unattended runs: a background shell can be stopped while the session is idle and
+  memory is short, so run long drivers in the foreground, under 10 min. A capture of a
+  minimized window has zero size, so log it and carry on. Before an untouched run,
+  confirm nobody is at the controller, because a person's input turns it into a hand run.

@@ -2,9 +2,13 @@ import numpy as np
 
 from controller_lab.analysis import (
     button_presses,
+    circle_stats,
+    dpad_ghosts,
     intervals,
     motion_start,
     noise_std,
+    press_train,
+    snapback,
     spin_timing,
     stick_offset,
     timing_stats,
@@ -140,3 +144,71 @@ def test_noise_std_of_a_known_array():
 def test_button_presses_count_rising_edges():
     masks = np.array([0, 0b1, 0b1, 0, 0b11, 0b10])
     assert button_presses(masks) == 3
+
+
+# ---- sticks, buttons and D-pad --------------------------------------------
+
+FULL = 32767
+
+
+def ring(radius_at, n=720):
+    """Points around the rim. `radius_at(deg)` gives the radius as a fraction of full."""
+    deg = np.arange(n) * 360 / n
+    r = np.array([radius_at(d) for d in deg]) * FULL
+    rad = np.radians(deg)
+    return r * np.cos(rad), -r * np.sin(rad)  # SDL's y grows downwards
+
+
+def test_perfect_circle_has_about_zero_circle_error():
+    x, y = ring(lambda d: 1.0)
+    stats = circle_stats(x, y)
+    assert stats.error_pct < 0.1
+    assert stats.bins_covered == 72
+
+
+def test_flattened_quadrant_is_named_as_the_weakest_direction():
+    x, y = ring(lambda d: 0.8 if 90 <= d < 180 else 1.0)
+    stats = circle_stats(x, y)
+    assert stats.weakest == "up-left"
+    assert stats.error_pct > 4.0
+
+
+def test_snapback_overshoot_of_30_percent_is_detected():
+    t = np.array([0, 100, 200, 208, 216, 224, 260, 400, 700]) * MS
+    x = np.array([0, FULL, FULL, 0, -0.3 * FULL, -0.1 * FULL, 500, 500, 500])
+    settle_pct, spike_pct = snapback(t, x, np.zeros_like(x))
+    assert abs(spike_pct - 30.0) < 0.5
+    assert abs(settle_pct - 500 / FULL * 100) < 0.01
+
+
+def press_times(bounce_at=None):
+    """20 taps: 80 ms down, 120 ms up. Optionally split one press with a 6 ms bounce."""
+    t, pressed, now = [0], [False], 0
+    for i in range(20):
+        now += 120
+        t.append(now)
+        pressed.append(True)
+        if i == bounce_at:
+            t += [now + 40, now + 46]
+            pressed += [False, True]
+        now += 80
+        t.append(now)
+        pressed.append(False)
+    return np.array(t) * MS, np.array(pressed)
+
+
+def test_press_train_with_a_6_ms_bounce_is_flagged_as_chatter():
+    count, chatter = press_train(*press_times(bounce_at=7))
+    assert chatter == 1
+    assert count == 21
+
+
+def test_clean_train_of_20_is_not_flagged():
+    assert press_train(*press_times()) == (20, 0)
+
+
+def test_dpad_ghost_is_detected():
+    up, left = 1 << 10, 1 << 12
+    masks = np.array([0, up, 0, up, up | left, up, 0])
+    assert dpad_ghosts(masks, neighbours=left | (1 << 13)) == 1
+    assert dpad_ghosts(np.array([0, up, 0, up, 0]), neighbours=left) == 0

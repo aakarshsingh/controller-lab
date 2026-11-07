@@ -2,10 +2,29 @@
 
 from __future__ import annotations
 
-from controller_lab.checks import idle_drift, report_timing
+from controller_lab.checks import (
+    button_taps,
+    centring,
+    circularity,
+    dpad,
+    idle_drift,
+    report_timing,
+    sweep,
+    triggers,
+)
 from controller_lab.checks.base import Check
 
-ORDER: tuple[Check, ...] = (idle_drift.CHECK, report_timing.CHECK)
+ORDER: tuple[Check, ...] = (
+    idle_drift.CHECK,
+    centring.CHECK,
+    circularity.CHECK,
+    sweep.CHECK,
+    triggers.CHECK,
+    button_taps.CHECK,
+    button_taps.CONNECTION_CHECK,
+    dpad.CHECK,
+    report_timing.CHECK,
+)
 SUITES = ("full", "connection")
 
 
