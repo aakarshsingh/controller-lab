@@ -152,3 +152,46 @@ def test_generic_profile_adds_the_not_calibrated_note():
     result = score_run(run({"idle_drift": idle(1.0)}), generic)
     assert NOT_CALIBRATED in result.notes
     assert NOT_CALIBRATED not in score_run(run({"idle_drift": idle(1.0)}), SERIES).notes
+
+
+def idle_full(left=1.0, right=1.0, stray=0):
+    return {
+        "status": "done",
+        "metrics": {
+            "left_offset_pct": left,
+            "left_direction": "up",
+            "left_noise_pct": 0.0,
+            "right_offset_pct": right,
+            "right_direction": "left",
+            "right_noise_pct": 0.0,
+            "stray_presses": stray,
+        },
+    }
+
+
+def test_issue_counts_use_the_singular_for_one():
+    one = score_run(run({"idle_drift": idle_full(stray=1)}), SERIES)
+    two = score_run(run({"idle_drift": idle_full(stray=2)}), SERIES)
+    assert "Buttons registered 1 stray press at rest" in one.issues
+    assert "Buttons registered 2 stray presses at rest" in two.issues
+
+
+def test_a_flick_snapback_gets_the_flick_wording_not_the_stick_one():
+    flicks = {"status": "done", "metrics": {"wrong_direction": 0, "snapbacks": 1}}
+    result = score_run(run({"skill_flicks": flicks}), SERIES)
+    flagged = [i for i in result.issues if "snap" in i]
+    assert flagged == ["Right stick snapped back past centre after 1 flick"]
+
+
+def test_inferences_cover_each_tested_category_and_no_untested_one():
+    result = score_run(run({"idle_drift": idle_full()}), SERIES)
+    assert set(result.inferences) == {"left_stick", "right_stick", "buttons"}
+    assert all(1 <= len(lines) <= 2 for lines in result.inferences.values())
+
+
+def test_a_rest_offset_inside_the_deadzone_says_games_wont_see_it():
+    result = score_run(run({"idle_drift": idle_full(right=4.0)}), SERIES)
+    first = result.inferences["right_stick"][0]
+    assert "4.0% left" in first
+    assert "26.5%" in first
+    assert "games won't see it" in first

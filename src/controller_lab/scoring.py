@@ -218,6 +218,8 @@ class RunScore:
     summary: str
     profile: str
     profile_version: int
+    # One or two plain lines per tested category: what it means in games, and what to do.
+    inferences: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -265,49 +267,161 @@ def _degree(score: float) -> str:
     return "slightly" if score >= FAULTY_BELOW else "noticeably" if score >= 30 else "badly"
 
 
+def _n(value: float, one: str, many: str | None = None) -> str:
+    """A count with its noun, singular for exactly 1: "1 flick", "2 flicks"."""
+    count = round(value)
+    return f"{count} {one if count == 1 else many or one + 's'}"
+
+
 def _issue(m: MetricDef, value: float, score: float, values: dict[str, Any]) -> str:
-    """One plain-language line for a metric that scored under 80."""
+    """One plain-language line for a metric that scored under 80, keyed by exact name."""
     side = "Left" if m.name.startswith("left") else "Right"
     if m.name.endswith("_idle_offset"):
         direction = values.get(f"idle_drift.{side.lower()}_direction", "off centre")
         return f"{side} stick drifts {_degree(score)} {direction} ({value:.0f}%)"
-    templates = {
-        "_idle_noise": f"{side} stick jitters at rest ({value:.2f}% noise)",
-        "_settle_mean": f"{side} stick doesn't return to centre cleanly ({value:.1f}% off)",
-        "_settle_max": f"{side} stick sometimes stops {value:.1f}% off centre after letting go",
-        "_snapback": f"{side} stick snaps back past centre ({value:.0f}%)",
-        "_circle_error": f"{side} stick's range isn't round ({value:.1f}% circle error)",
-        "_reach_diff": f"{side} stick reaches further one way than the other ({value:.1f}%)",
-        "_sweep_centre": f"{side} stick is coarse near centre ({value:.0f} steps)",
-        "_sweep_jump": f"{side} stick skips values when moved slowly ({value:.0f}% jump)",
+    per_side = {
+        "idle_noise": f"{side} stick jitters at rest ({value:.2f}% noise)",
+        "settle_mean": f"{side} stick doesn't return to centre cleanly ({value:.1f}% off)",
+        "settle_max": f"{side} stick sometimes stops {value:.1f}% off centre after letting go",
+        "snapback": f"{side} stick snaps back past centre ({value:.0f}%)",
+        "circle_error": f"{side} stick's range isn't round ({value:.1f}% circle error)",
+        "reach_diff": f"{side} stick reaches further one way than the other ({value:.1f}%)",
+        "sweep_centre": f"{side} stick is coarse near centre ({_n(value, 'step')})",
+        "sweep_jump": f"{side} stick skips values when moved slowly ({value:.0f}% jump)",
     }
-    for suffix, text in templates.items():
-        if m.name.endswith(suffix):
-            return text
-    fixed = {
+    templates = {f"{s_}_{k}": v for s_ in ("left", "right") for k, v in per_side.items()}
+    templates |= {
         "sprint_reach": f"Left stick falls short while RT is held ({value:.0f}% reach)",
-        "flick_wrong_direction": f"Right stick flicks registered the wrong way {value:.0f} times",
-        "flick_snapback": f"Right stick snapped back the wrong way after {value:.0f} flicks",
+        "flick_wrong_direction": f"{_n(value, 'right stick flick')} registered the wrong way",
+        "flick_snapback": f"Right stick snapped back past centre after {_n(value, 'flick')}",
         "lt_rest": f"LT doesn't rest at zero ({value:.0f})",
         "rt_rest": f"RT doesn't rest at zero ({value:.0f})",
         "lt_reach": f"LT doesn't reach full travel ({value:.0f}%)",
         "rt_reach": f"RT doesn't reach full travel ({value:.0f}%)",
         "lt_jump": f"LT skips values when squeezed slowly ({value:.0f}% jump)",
         "rt_jump": f"RT skips values when squeezed slowly ({value:.0f}% jump)",
-        "rt_sag": f"RT sagged below 95% while held, {value:.0f} times",
+        "rt_sag": f"RT sagged below 95% while held, {_n(value, 'time')}",
         "throttle_jitter": f"RT wobbles when held part way ({value:.2f}% jitter)",
-        "stray_presses": f"Buttons registered {value:.0f} stray presses at rest",
+        "stray_presses": f"Buttons registered {_n(value, 'stray press', 'stray presses')} at rest",
         "tap_count_error": f"A button missed or added up to {value:.0f} of {TAPS} taps",
-        "tap_chatter": f"Buttons chattered {value:.0f} times, a press registering twice",
-        "hold_dropouts": f"Held buttons dropped out {value:.0f} times",
-        "dpad_ghosts": f"The D-pad fired a neighbouring direction {value:.0f} times",
+        "tap_chatter": f"Buttons chattered {_n(value, 'time')}, a press registering twice",
+        "hold_dropouts": f"Held buttons dropped out {_n(value, 'time')}",
+        "dpad_ghosts": f"The D-pad fired a neighbouring direction {_n(value, 'time')}",
         "dpad_diagonals": f"The D-pad missed diagonals ({value:.0%} registered)",
         "usb_mean": f"USB reports arrive slowly ({value:.1f} ms average)",
         "usb_p99": f"USB reports are sometimes late ({value:.1f} ms at the 99th percentile)",
         "usb_rate": f"USB report rate is low ({value:.0f} Hz)",
-        "usb_gaps": f"USB reports had {value:.0f} gaps over 30 ms",
+        "usb_gaps": f"USB reports had {_n(value, 'gap')} over 30 ms",
     }
-    return fixed.get(m.name, f"{m.name.replace('_', ' ')} is outside the healthy range")
+    return templates.get(m.name, f"{m.name.replace('_', ' ')} is outside the healthy range")
+
+
+# What a weak metric means in play, keyed by the metric name without its stick side.
+MEANING = {
+    "idle_offset": "it rests off centre, which can show up as drift",
+    "idle_noise": "its reading jitters at rest",
+    "settle_mean": "it doesn't spring back to centre cleanly, so aim can creep after a move",
+    "settle_max": "it sometimes stops off centre after a push, so aim can creep",
+    "snapback": "it overshoots centre on release, which can nudge aim the other way",
+    "circle_error": "its range isn't round, so diagonals can feel short of full speed",
+    "reach_diff": "it reaches further one way, so turning speed can differ by direction",
+    "sweep_centre": "small moves near centre are coarse, so fine aim can feel steppy",
+    "sweep_jump": "it skips values when moved slowly, so slow aim can jerk",
+    "sprint_reach": "it falls short while RT is held, so sprint-and-turn can feel limited",
+    "flick_wrong_direction": "quick flicks sometimes register the wrong way",
+    "flick_snapback": "quick flicks sometimes bounce back past centre",
+    "lt_rest": "LT doesn't fully release, so a game may see a light press",
+    "rt_rest": "RT doesn't fully release, so a game may see a light press",
+    "lt_reach": "LT doesn't reach full, so a full press may not register",
+    "rt_reach": "RT doesn't reach full, so full throttle may not register",
+    "lt_jump": "LT skips values, so part presses can feel steppy",
+    "rt_jump": "RT skips values, so part presses can feel steppy",
+    "rt_sag": "RT sags while held down, so sprint or full throttle can drop",
+    "throttle_jitter": "RT wobbles when held part way, so steady throttle is hard",
+    "stray_presses": "a button pressed itself with nobody touching it",
+    "tap_count_error": "a button missed or added taps",
+    "tap_chatter": "a single press sometimes registered twice",
+    "hold_dropouts": "a held input briefly let go",
+    "dpad_ghosts": "the D-pad sometimes fires a neighbouring direction",
+    "dpad_diagonals": "the D-pad doesn't always register diagonals",
+    "usb_mean": "input arrives later than on a healthy controller over USB",
+    "usb_p99": "some reports arrive late",
+    "usb_rate": "it sends fewer reports than a healthy controller over USB",
+    "usb_gaps": "reports sometimes pause for over 30 ms",
+    "bluetooth_mean": "input arrives later than on the other controllers over Bluetooth",
+    "bluetooth_p99": "some reports arrive later than on the other controllers",
+    "bluetooth_rate": "it sends fewer reports than the other controllers over Bluetooth",
+}
+# Said when nothing in a category is weak. It claims only what was measured.
+ALL_GOOD = "Everything measured for it is in the healthy range."
+
+
+def _stick_rest(side: str, values: dict[str, Any], profile: Profile) -> str | None:
+    offset = values.get(f"idle_drift.{side}_offset_pct")
+    deadzone = profile.deadzones.get(side)
+    if not _finite(offset) or not deadzone:
+        return None
+    direction = values.get(f"idle_drift.{side}_direction", "off")
+    dz = deadzone / 32767 * 100
+    limit = profile.auto_fail["idle_offset_pct"]
+    rest = f"Rests {offset:.1f}% {direction} of centre"
+    if offset > dz:
+        return f"{rest}, past the game deadzone of {dz:.1f}%, so games will see drift."
+    if offset > limit:
+        return (
+            f"{rest}, inside the game deadzone of {dz:.1f}% but over the {limit:.0f}% limit,"
+            " so it may grow into drift. Retest once to rule out where it came to rest."
+        )
+    return f"{rest}, inside the game deadzone of {dz:.1f}%, so games won't see it."
+
+
+def _connection_line(values: dict[str, Any], profile: Profile, connection: str) -> str | None:
+    mean, rate = values.get("report_timing.mean_ms"), values.get("report_timing.rate_hz")
+    if not (_finite(mean) and _finite(rate)):
+        return None
+    if connection == "usb":
+        ref = profile.usb_reference
+        return (
+            f"Reports every {mean:.1f} ms at {rate:.0f} Hz, against about"
+            f" {ref.get('mean_ms', 0):.1f} ms for a healthy controller over USB."
+        )
+    return f"Reports every {mean:.1f} ms at {rate:.0f} Hz over Bluetooth."
+
+
+def inferences(
+    score: RunScore, values: dict[str, Any], profile: Profile, connection: str = "usb"
+) -> dict[str, list[str]]:
+    """One or two plain lines per tested category: what it means in games, and what to do.
+
+    The first line anchors the reading where there is a reference, such as a stick's rest
+    against the game deadzone. The second explains the weakest metric, or says all is well.
+    """
+    out: dict[str, list[str]] = {}
+    for key, cat in score.categories.items():
+        if cat.score is None:
+            continue
+        lines: list[str] = []
+        if key in ("left_stick", "right_stick"):
+            rest = _stick_rest(key.split("_")[0], values, profile)
+            if rest:
+                lines.append(rest)
+        elif key == "connection":
+            line = _connection_line(values, profile, connection)
+            if line:
+                lines.append(line)
+        worst_name, worst = min(cat.parts.items(), key=lambda kv: kv[1])
+        if worst < MINOR_BELOW:
+            bare = worst_name.removeprefix("left_").removeprefix("right_")
+            meaning = MEANING.get(bare, "one reading is outside the healthy range")
+            if worst < FAULTY_BELOW:
+                advice = "That is likely a hardware fault: clean, recalibrate or repair it."
+            else:
+                advice = "It's minor, so retest before blaming the controller."
+            lines.append(f"Weakest: {meaning}. {advice}")
+        else:
+            lines.append(ALL_GOOD)
+        out[key] = lines[:2]
+    return out
 
 
 def _bluetooth(
@@ -418,7 +532,7 @@ def score_run(
         "Faulty": "A hardware fault is likely. See the issues below.",
         "Not tested": "Nothing was measured, so there is no verdict.",
     }[verdict]
-    return RunScore(
+    result = RunScore(
         categories=categories,
         overall=overall,
         verdict=verdict,
@@ -429,6 +543,8 @@ def score_run(
         profile=profile.key,
         profile_version=profile.version,
     )
+    result.inferences = inferences(result, values, profile, connection)
+    return result
 
 
 def _auto_fails(

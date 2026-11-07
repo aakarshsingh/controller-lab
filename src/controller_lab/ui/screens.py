@@ -59,12 +59,16 @@ CHECK_HINTS = "B / S  skip    R  redo    Esc  quit"
 # In a phase that tests B, B is input, so only S skips.
 CHECK_HINTS_B_INPUT = "S  skip    R  redo    Esc  quit"
 START_HINTS = "B / S  skip    Space  start    Esc  quit"
+START_HINTS_PREVIOUS = "B / S  skip    View / Backspace  redo the last check    Esc  quit"
 END_METRICS = 8
 END_LINES = 10
 ISSUES_BOTTOM = 432
 NOTES_BOTTOM = 425
 SKIPPED_NAMED = 4
-RESULT_HINTS = "N  test another controller    C  compare    Esc  quit"
+RESULT_HINTS = "Y  details    N  test another controller    C  compare    Esc  quit"
+DETAILS_HINTS = "Up/Down  page    Y / B  back    Esc  quit"
+DETAILS_TOP = 112
+DETAILS_BOTTOM = 486
 VERDICT_COLOURS = {"Healthy": GREEN, "Minor issues": (246, 197, 32), "Faulty": RED}
 INTRO_COLOUR = (246, 197, 32)
 AXIS_FULL = 32768
@@ -323,7 +327,7 @@ def results(
     for n, (item, item_colour) in enumerate(lines):
         parts = _wrap(item, 20, width)
         if y + 20 * len(parts) > ISSUES_BOTTOM:
-            text(s, f"and {len(lines) - n} more in report.html", (x, y), 20, GREY)
+            text(s, f"and {len(lines) - n} more. Y shows them all", (x, y), 20, GREY)
             break
         for part in parts:
             text(s, part, (x, y), 20, item_colour)
@@ -348,6 +352,52 @@ def results(
         text(s, limit, (MARGIN, 446 + i * 17), 17, GREY)
     if rig_result is not None and not rig_result.ok:
         text(s, "This PC's polling loop was too slow for timing checks.", (MARGIN, 500), 18, RED)
+
+
+def _details_rows(score: RunScore) -> list[tuple[str, int, tuple[int, int, int], int]]:
+    """Every row of the details page as (text, size, colour, height), in reading order."""
+    width = WIDTH - 2 * MARGIN
+    rows: list[tuple[str, int, tuple[int, int, int], int]] = []
+    for key, cat in score.categories.items():
+        lines = score.inferences.get(key)
+        if cat.score is None or not lines:
+            continue
+        rows.append((f"{cat.title}  {cat.score:.0f}", 28, _score_colour(cat.score), 34))
+        for line in lines:
+            rows += [(part, 22, WHITE, 26) for part in _wrap(line, 22, width - 20)]
+        rows.append(("", 22, WHITE, 10))
+    items = [(t, RED) for t in score.auto_fails] + [(t, WHITE) for t in score.issues]
+    rows.append(("Issues", 28, GREY, 34))
+    if not items:
+        rows.append(("No issues found.", 22, GREEN, 26))
+    for item, colour in items:
+        rows += [(f"-  {part}", 22, colour, 26) for part in _wrap(item, 22, width - 40)]
+    return rows
+
+
+def details(s: pygame.Surface, label_name: str, score: RunScore, page: int) -> int:
+    """What each category's readings mean, and every issue, paged. Returns the page count."""
+    pages: list[list[tuple[str, int, tuple[int, int, int], int]]] = [[]]
+    used = 0
+    for row in _details_rows(score):
+        if used + row[3] > DETAILS_BOTTOM - DETAILS_TOP and pages[-1]:
+            pages.append([])
+            used = 0
+        pages[-1].append(row)
+        used += row[3]
+    page = max(0, min(page, len(pages) - 1))
+    _frame(s, 6, "B  Back to results", DETAILS_HINTS)
+    text(s, f"What this means for {label_name}", (MARGIN, 70), 34)
+    if len(pages) > 1:
+        marker = f"Page {page + 1} of {len(pages)}"
+        text(s, marker, (WIDTH - MARGIN - _width(marker, 24), 78), 24, GREY)
+    y = DETAILS_TOP
+    for line, size, colour, height in pages[page]:
+        indent = 0 if size == 28 else 20
+        if line:
+            text(s, line, (MARGIN + indent, y), size, colour)
+        y += height
+    return len(pages)
 
 
 def writing(s: pygame.Surface, message: str) -> None:
@@ -391,7 +441,7 @@ def start(
     The check starts only when that same input is pressed, then everything is let go.
     """
     prompt = gate_prompt(gate) if gate else "Press A to start"
-    _frame(s, 5, prompt, START_HINTS)
+    _frame(s, 5, prompt, START_HINTS_PREVIOUS if index > 0 else START_HINTS)
     _check_title(s, check, index, total)
     text(s, check.title, (MARGIN, 112), 44, INTRO_COLOUR)
     about = check.brief or check.phases[0].prompt

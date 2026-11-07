@@ -194,6 +194,14 @@ def _score_section(score: dict[str, Any]) -> str:
         parts.append(f"<h2>Issues</h2><ul>{items}</ul>")
     else:
         parts.append("<h2>Issues</h2><p class='healthy'>No issues found.</p>")
+    meaning = score.get("inferences") or {}
+    titles = {k: (c or {}).get("title", k) for k, c in (score.get("categories") or {}).items()}
+    if meaning:
+        rows = "".join(
+            f"<li><b>{_e(titles.get(k, k))}</b>: {' '.join(_e(line) for line in lines)}</li>"
+            for k, lines in meaning.items()
+        )
+        parts.append(f"<h2>What this means</h2><ul>{rows}</ul>")
     notes = score.get("notes", [])
     if notes:
         parts.append("<ul class='muted'>" + "".join(f"<li>{_e(n)}</li>" for n in notes) + "</ul>")

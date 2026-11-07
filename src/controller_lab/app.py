@@ -89,10 +89,13 @@ KEY_ACTIONS = {
     pygame.K_r: "redo",
     pygame.K_n: "next",
     pygame.K_c: "compare",
+    pygame.K_y: "details",
 }
 BUTTON_ACTIONS = {
     pygame.CONTROLLER_BUTTON_A: "continue",
     pygame.CONTROLLER_BUTTON_B: "b",
+    pygame.CONTROLLER_BUTTON_Y: "details",
+    pygame.CONTROLLER_BUTTON_BACK: "previous",  # View
     pygame.CONTROLLER_BUTTON_DPAD_UP: "up",
     pygame.CONTROLLER_BUTTON_DPAD_DOWN: "down",
 }
@@ -159,6 +162,9 @@ class App:
         self.gate_armed_at: int | None = None
         self.drawn_key: tuple[int, int, bool] | None = None
         self.nav_armed = False
+        # The Results details page: its page, or None while it's closed.
+        self.details_page: int | None = None
+        self.details_pages = 1
         self.counting_starts: list[int] = []
         self.phase_fired = False
         self.rumble_ok: dict[int, bool] = {}
@@ -198,7 +204,7 @@ class App:
                 if self.recorder is not None and self.snap is not None:
                     self.recorder.add(t, self.snap)
 
-            if self.state in (Screen.LABEL, Screen.SUITE):
+            if self.state in (Screen.LABEL, Screen.SUITE) or self.details_page is not None:
                 self.nav_stick()
             if self.state == Screen.START:
                 self.tick_start(now)
@@ -226,6 +232,7 @@ class App:
             pygame.key.start_text_input()
         elif self.state == Screen.NEW_LABEL:
             pygame.key.stop_text_input()
+        self.details_page = None  # any screen change closes the details page
         self.state = state
         self.last_frame = 0
 
@@ -311,6 +318,16 @@ class App:
                 self.go(Screen.SETUP)
         elif state == Screen.SETUP and action == "continue":
             self.go(Screen.RIG)
+        elif state == Screen.RESULTS and self.details_page is not None:
+            if action in ("up", "down"):
+                step = 1 if action == "down" else -1
+                self.details_page = max(0, min(self.details_pages - 1, self.details_page + step))
+            elif action in ("back", "details", "continue"):
+                self.details_page = None
+            self.last_frame = 0
+        elif state == Screen.RESULTS and action == "details" and self.score is not None:
+            self.details_page = 0
+            self.last_frame = 0
         elif state == Screen.RESULTS and action in ("continue", "next"):
             self.test_another()
         elif state == Screen.RESULTS and action == "compare":
@@ -323,6 +340,10 @@ class App:
                 self.arm_gate()
             elif action in ("b", "skip"):
                 self.skip_check()
+            elif action in ("previous", "back") and self.check_index > 0:
+                # Redo the check before this one in full. Its new result replaces the old.
+                self.check_index -= 1
+                self.begin_check()
             return
         if state == Screen.CHECK and self.gate_pending:
             if action == "continue":
@@ -918,6 +939,8 @@ class App:
             )
         elif state == Screen.FOCUS_LOST:
             screens.focus_lost(s, self.check, self.check_index, len(self.checks))
+        elif state == Screen.RESULTS and self.details_page is not None and self.score:
+            self.details_pages = screens.details(s, self.label, self.score, self.details_page)
         elif state == Screen.RESULTS:
             screens.results(
                 s,
