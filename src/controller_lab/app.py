@@ -17,7 +17,17 @@ from pygame._sdl2 import controller
 
 from controller_lab import devtree, history, report, rig, scoring
 from controller_lab.checks import registry
-from controller_lab.checks.base import INTRO_S, Check, CheckData, EndCondition, Outcome, Phase
+from controller_lab.checks.base import (
+    Check,
+    CheckData,
+    EndCondition,
+    Outcome,
+    Phase,
+    at_rest,
+    gate_pressed,
+    phase_gate,
+    uses_b,
+)
 from controller_lab.detect import ControllerInfo, controller_info
 from controller_lab.devtree import DeviceInfo
 from controller_lab.rig import RigResult
@@ -32,6 +42,11 @@ INFO_REFRESH_NS = 1_000_000_000
 PROGRESS_NS = 250_000_000
 QUIT_CONFIRM_NS = 3 * 1_000_000_000
 END_CARD_NS = 5 * 1_000_000_000
+# After a gate input is pressed, wait for every input to rest, but never longer than this.
+REST_WAIT_NS = 3 * 1_000_000_000
+# The left stick steps a list selection once past NAV_ON, and re-arms under NAV_OFF.
+NAV_ON = 0.5 * 32767
+NAV_OFF = 0.25 * 32767
 SUITES = registry.SUITES
 SAMPLE_HEADER = "t_ns,lx,ly,rx,ry,lt,rt,buttons"
 SAMPLE_WIDTH = 7
@@ -48,6 +63,7 @@ class Screen(StrEnum):
     SUITE = "suite"
     SETUP = "setup"
     RIG = "rig"
+    START = "start"
     CHECK = "check"
     CHECK_END = "check_end"
     FOCUS_LOST = "focus_lost"
@@ -56,9 +72,9 @@ class Screen(StrEnum):
 
 
 # A run is in progress in these states. Device events pause it instead of resetting.
-RUN_STATES = {Screen.CHECK, Screen.CHECK_END, Screen.FOCUS_LOST, Screen.PAUSED}
+RUN_STATES = {Screen.START, Screen.CHECK, Screen.CHECK_END, Screen.FOCUS_LOST, Screen.PAUSED}
 # The device tree is never read in these states, so it can't delay sampling.
-NO_DEVTREE = {Screen.RIG, Screen.CHECK, Screen.CHECK_END, Screen.FOCUS_LOST}
+NO_DEVTREE = {Screen.RIG, Screen.START, Screen.CHECK, Screen.CHECK_END, Screen.FOCUS_LOST}
 # Backspace goes back one screen before the checks start. B does too, and skips during them.
 BACK = {Screen.SUITE: Screen.LABEL, Screen.SETUP: Screen.SUITE}
 
@@ -135,8 +151,14 @@ class App:
         self.phase_index = 0
         self.phase_starts: list[int] = []
         self.phase_end: EndCondition | None = None
-        # A phase with an intro starts counting only once its get-ready banner is over.
+        # A gated phase starts counting only once its gate input was pressed, then rested.
         self.counting_from = 0
+        self.gate: str | None = None
+        self.gate_pending = False
+        self.gate_seen_up = False
+        self.gate_armed_at: int | None = None
+        self.drawn_key: tuple[int, int, bool] | None = None
+        self.nav_armed = False
         self.counting_starts: list[int] = []
         self.phase_fired = False
         self.rumble_ok: dict[int, bool] = {}
@@ -176,7 +198,11 @@ class App:
                 if self.recorder is not None and self.snap is not None:
                     self.recorder.add(t, self.snap)
 
-            if self.state == Screen.CHECK:
+            if self.state in (Screen.LABEL, Screen.SUITE):
+                self.nav_stick()
+            if self.state == Screen.START:
+                self.tick_start(now)
+            elif self.state == Screen.CHECK:
                 self.tick_check(now)
             elif self.state == Screen.CHECK_END:
                 self.tick_end_card(now)
@@ -292,18 +318,30 @@ class App:
 
     def act_run(self, action: str) -> None:
         state = self.state
+        if state == Screen.START:
+            if action == "continue":
+                self.arm_gate()
+            elif action in ("b", "skip"):
+                self.skip_check()
+            return
+        if state == Screen.CHECK and self.gate_pending:
+            if action == "continue":
+                self.arm_gate()
+                return
+            if action == "b" and uses_b(self.phase, self.gate):
+                return
         if state == Screen.CHECK and self.phase.answer and action in ("continue", "b", "back"):
             # In an answer phase, A or Enter means yes and B or Backspace means no.
             self.answers[self.phase_index] = action == "continue"
             self.next_phase(time.perf_counter_ns())
             return
         if action == "b":
+            if state == Screen.CHECK and not self.gate_pending and uses_b(self.phase):
+                return  # B is input in a phase that tests it. S still skips.
             action = "skip"
         if state == Screen.CHECK:
             if action == "skip":
-                self.recorder = None
-                self.record(Outcome("skipped", message="Skipped"))
-                self.advance()
+                self.skip_check()
             elif action == "redo":
                 self.begin_check()
         elif state == Screen.CHECK_END:
@@ -323,6 +361,24 @@ class App:
                 self.resume()
             elif action == "skip":
                 self.abandon_run(different=False)
+
+    def skip_check(self) -> None:
+        self.recorder = None
+        self.record(Outcome("skipped", message="Skipped"))
+        self.advance()
+
+    def nav_stick(self) -> None:
+        """Let the left stick move a list selection, one step per push."""
+        snap = self.snap
+        if snap is None:
+            return
+        ly = snap[1]
+        if abs(ly) < NAV_OFF:
+            self.nav_armed = True
+        elif self.nav_armed and abs(ly) > NAV_ON:
+            self.nav_armed = False
+            if not self.close_quit_confirm():
+                self.act("up" if ly < 0 else "down")
 
     def act_label(self, action: str) -> None:
         new_row = len(self.labels)
@@ -568,18 +624,58 @@ class App:
             self.advance()
             return
         self.results.pop(check.id, None)
-        self.recorder = Recorder(timing=check.is_timing)
+        self.recorder = None
         self.phase_index = 0
-        self.phase_starts = []
+        self.outcome = None
+        self.set_gate(phase_gate(check, 0))
+        self.go(Screen.START)
+
+    def set_gate(self, gate: str | None) -> None:
+        """Wait for `gate`: first released, then pressed, then every input at rest."""
+        self.gate = gate
+        self.gate_pending = gate is not None
+        self.gate_seen_up = False
+        self.gate_armed_at = None
+
+    def arm_gate(self) -> None:
+        """`Space` or `Enter` stands in for the gate input."""
+        if self.gate_armed_at is None:
+            self.gate_armed_at = time.perf_counter_ns()
+
+    def gate_passed(self, now: int) -> bool:
+        snap = self.snap
+        if snap is None or self.gate is None:
+            return False
+        if self.gate_armed_at is None:
+            # A press carried over from the screen before doesn't count.
+            if not gate_pressed(self.gate, snap):
+                self.gate_seen_up = True
+            elif self.gate_seen_up:
+                self.gate_armed_at = now
+            return False
+        return at_rest(snap) or now - self.gate_armed_at >= REST_WAIT_NS
+
+    def tick_start(self, now: int) -> None:
+        if self.gate_passed(now):
+            self.start_check(now)
+
+    def start_check(self, now: int) -> None:
+        """The start screen's gate passed: record from here, and count the first phase."""
+        self.recorder = Recorder(timing=self.check.is_timing)
+        self.phase_index = 0
+        self.phase_starts = [now]
         self.counting_starts = []
         self.rumble_ok = {}
         self.answers = {}
-        self.start_phase(time.perf_counter_ns())
-        self.outcome = None
+        self.set_gate(None)
+        self.begin_counting(now)
         self.go(Screen.CHECK)
 
     def tick_check(self, now: int) -> None:
-        if now < self.counting_from:
+        if self.gate_pending:
+            if self.gate_passed(now):
+                self.set_gate(None)
+                self.begin_counting(now)
             return
         phase, elapsed = self.phase, now - self.counting_from
         if not self.phase_fired:
@@ -608,13 +704,21 @@ class App:
             self.last_frame = 0
 
     def start_phase(self, now: int) -> None:
-        """Begin the current phase, with a fresh end condition when it counts something."""
+        """Begin the current phase. A gated one waits for its input before it counts."""
         self.phase_starts.append(now)
-        self.counting_from = now + (int(INTRO_S * 1e9) if self.phase.intro else 0)
-        self.counting_starts.append(self.counting_from)
+        self.counting_from = now
+        self.set_gate(phase_gate(self.check, self.phase_index))
+        if not self.gate_pending:
+            self.begin_counting(now)
+
+    def begin_counting(self, now: int) -> None:
+        """Start the phase's clock, with a fresh end condition when it counts something."""
+        self.counting_from = now
+        self.counting_starts.append(now)
         self.phase_fired = False
         until = self.phase.until
-        self.phase_end = until(self.counting_from) if until is not None else None
+        self.phase_end = until(now) if until is not None else None
+        self.last_frame = 0
 
     def start_rumble(self, low: float, high: float, ms: int) -> bool:
         """Run the body motors. Returns what SDL reports, or False when it can't."""
@@ -749,7 +853,10 @@ class App:
         if self.quit_asked_at is not None and now - self.quit_asked_at > QUIT_CONFIRM_NS:
             self.quit_asked_at = None
             self.last_frame = 0
-        if self.last_frame == 0:
+        key = (self.check_index, self.phase_index, self.gate_pending)
+        if self.last_frame == 0 or key != self.drawn_key:
+            # Redraw in full whenever the phase or its gate changes, so every prompt shows.
+            self.drawn_key = key
             self.last_frame = self.last_progress = now
             self.draw_check(now)
             if self.quit_asked_at is not None:
@@ -758,7 +865,8 @@ class App:
         elif now - self.last_progress >= PROGRESS_NS:
             self.last_progress = now
             # Only the spin phase fills the bar. While waiting for movement it stays empty.
-            fraction = self.phase_progress(now)[1] if self.phase.duration_s else 0.0
+            counting = self.phase.duration_s and not self.gate_pending
+            fraction = self.phase_progress(now)[1] if counting else 0.0
             done = screens.PROGRESS_RECT.copy()
             done.width = int(done.width * fraction)
             if done.width:
@@ -776,9 +884,10 @@ class App:
             self.phase_index,
             left,
             fraction,
-            max(0, self.counting_from - now) / 1e9,
+            self.gate if self.gate_pending else None,
             max(0, now - self.counting_from) / 1e9,
             None if self.check.is_timing else self.snap,
+            uses_b(self.phase, self.gate),
         )
 
     def render(self, now: int) -> None:
@@ -796,6 +905,8 @@ class App:
         elif state == Screen.PAUSED:
             run = self.run_info.connection if self.run_info is not None else ""
             screens.paused(s, self.pause_reason, self.label, run)
+        elif state == Screen.START:
+            screens.start(s, self.check, self.check_index, len(self.checks), self.gate, self.snap)
         elif state == Screen.CHECK:
             self.draw_check(now)
         elif state == Screen.CHECK_END:

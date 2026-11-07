@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -24,7 +25,35 @@ BUTTON_BITS = {
 }
 NS_PER_S = 1_000_000_000
 MASK = 6  # column of the button mask in a snapshot
-INTRO_S = 2.5
+AXIS_MAX = 32767
+GATE_PUSH = 0.5 * AXIS_MAX  # a stick or trigger past half way passes a gate
+REST_STICK = 0.2 * AXIS_MAX
+REST_TRIGGER = 0.05 * AXIS_MAX
+DPAD_BITS = sum(BUTTON_BITS[n] for n in ("Up", "Down", "Left", "Right"))
+# Plain names for gate inputs, and how the start prompt asks for them.
+GATE_NAMES = {
+    "LS": "the left stick",
+    "RS": "the right stick",
+    "LT": "LT, the left trigger",
+    "RT": "RT, the right trigger",
+    "LB": "LB, the left bumper",
+    "RB": "RB, the right bumper",
+    "Back": "View",
+    "Start": "Menu",
+    "D-pad": "the D-pad",
+    "Up": "D-pad up",
+    "Down": "D-pad down",
+    "Left": "D-pad left",
+    "Right": "D-pad right",
+}
+# The shorter names a "Press ... to start" prompt uses. Buttons keep their own letters.
+SHORT_NAMES = {
+    "LS": "the left stick",
+    "RS": "the right stick",
+    "D-pad": "the D-pad",
+    "Back": "View",
+    "Start": "Menu",
+}
 
 
 @dataclass(frozen=True)
@@ -37,9 +66,14 @@ class Phase:
     condition can count presses or rotations. A timeout with `timeout_ends_check` ends
     the whole check, and the check's `analyse` sees `timed_out`. `arrow` names a
     direction to point at on screen, such as "up-left". `focus` names the control in
-    use, such as "RS" or "LT", so the live view can ring it. `intro` is a get-ready
-    banner shown for `INTRO_S` before the phase starts counting, used when a check
-    moves to another stick or trigger.
+    use, such as "RS" or "LT", so the live view can ring it. `intro` marks the phase
+    where a check moves to another stick or trigger.
+
+    `gate` names the input that starts the phase: a button such as "A", "LT" or "RT"
+    past half, "LS" or "RS" past half way, or "D-pad". Inputs joined by "+" must all
+    be down. The phase counts only once the gate input is pressed and every input is
+    back at rest. When `gate` is None, `phase_gate` picks one: the focus or "A" for a
+    check's first phase, and the focus for a phase with an `intro`.
 
     `rumble` is (low, high, ms) for the body motors, started once the phase counts.
     With `answer`, the phase waits for a yes or no: A or Enter means yes, B or
@@ -58,6 +92,7 @@ class Phase:
     arrow: str | None = None
     focus: str | None = None
     intro: str = ""
+    gate: str | None = None
     rumble: tuple[float, float, int] | None = None
     answer: bool = False
     gauge: float | None = None
@@ -83,10 +118,12 @@ class CheckData:
     answers: tuple[bool | None, ...] = ()
 
     def phase_rows(self, index: int, extra_ns: int = 0) -> slice:
-        """Rows that belong to phase `index`: the state held when it started, then every
-        change until the next phase started, plus `extra_ns` beyond that."""
+        """Rows that belong to phase `index`: the state held when it began counting, then
+        every change until the next phase started, plus `extra_ns` beyond that. Time spent
+        waiting at a gate belongs to no phase."""
         starts = self.phase_starts_ns
-        start = starts[index]
+        counting = self.counting_starts_ns
+        start = counting[index] if index < len(counting) else starts[index]
         stop = starts[index + 1] if index + 1 < len(starts) else self.end_ns
         first = max(0, int(np.searchsorted(self.t_ns, start, side="right")) - 1)
         last = int(np.searchsorted(self.t_ns, stop + extra_ns, side="right"))
@@ -111,21 +148,88 @@ class Check:
     suites: frozenset[str]
     is_timing: bool
     analyse: Callable[[CheckData], Outcome]
+    # One or two plain lines for the start screen: what to do, and about how long.
+    brief: str = ""
+
+
+def phase_gate(check: Check, index: int) -> str | None:
+    """The input that starts phase `index`, or None when it starts straight away."""
+    phase = check.phases[index]
+    if phase.gate is not None:
+        return phase.gate
+    if index == 0:
+        return phase.focus or "A"
+    return phase.focus if phase.intro and phase.focus else None
+
+
+def gate_name(gate: str) -> str:
+    return " + ".join(GATE_NAMES.get(part, part) for part in gate.split("+"))
+
+
+def gate_prompt(gate: str) -> str:
+    """What the start screen asks for, such as "Press RT to start"."""
+    parts = gate.split("+")
+    verb = "Push" if all(p in ("LS", "RS") for p in parts) else "Press"
+    short = " + ".join(SHORT_NAMES.get(p, p) for p in parts)
+    return f"{verb} {short} to start"
+
+
+def _part_pressed(part: str, snap: Snapshot) -> bool:
+    lx, ly, rx, ry, lt, rt, mask = snap
+    if part == "LS":
+        return math.hypot(lx, ly) > GATE_PUSH
+    if part == "RS":
+        return math.hypot(rx, ry) > GATE_PUSH
+    if part == "LT":
+        return lt > GATE_PUSH
+    if part == "RT":
+        return rt > GATE_PUSH
+    if part == "D-pad":
+        return mask & DPAD_BITS != 0
+    bit = BUTTON_BITS.get(part)
+    return bit is not None and mask & bit != 0
+
+
+def gate_pressed(gate: str, snap: Snapshot) -> bool:
+    return all(_part_pressed(part, snap) for part in gate.split("+"))
+
+
+def at_rest(snap: Snapshot) -> bool:
+    """No button down, both triggers under 5% and both sticks under 20%."""
+    lx, ly, rx, ry, lt, rt, mask = snap
+    return (
+        mask == 0
+        and lt < REST_TRIGGER
+        and rt < REST_TRIGGER
+        and math.hypot(lx, ly) < REST_STICK
+        and math.hypot(rx, ry) < REST_STICK
+    )
+
+
+def uses_b(phase: Phase, gate: str | None = None) -> bool:
+    """True when the phase reads B, so B is input there and not skip."""
+    named = (phase.focus or "").split("+") + (gate or "").split("+")
+    return phase.answer or "B" in named
 
 
 def count_presses(bits: int, target: int, idle_s: float) -> Callable[[int], EndCondition]:
-    """An end condition: `target` presses of all of `bits` together, or `idle_s` with no
-    change to them. The idle clock starts with the phase."""
+    """An end condition: `target` presses of all of `bits` together, or `idle_s` after the
+    last press. The idle clock starts at the first press, so reading the prompt never ends
+    the phase. A press already down when the phase starts isn't counted."""
 
     def until(start_ns: int) -> EndCondition:
-        state = {"down": False, "count": 0, "last": start_ns}
+        state: dict[str, Any] = {"down": None, "count": 0, "last": None}
 
         def end(t_ns: int, snap: Snapshot) -> bool:
             down = snap[MASK] & bits == bits
-            if down != state["down"]:
+            if state["down"] is None:
+                state["down"] = down
+            elif down != state["down"]:
                 state["down"], state["last"] = down, t_ns
                 state["count"] += int(down)
-            return state["count"] >= target or t_ns - state["last"] >= idle_s * NS_PER_S
+            last = state["last"]
+            idle = last is not None and t_ns - last >= idle_s * NS_PER_S
+            return state["count"] >= target or idle
 
         return end
 

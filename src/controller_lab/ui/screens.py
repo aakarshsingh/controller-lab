@@ -14,7 +14,7 @@ from typing import Any
 import pygame
 
 from controller_lab.analysis import DIRECTIONS
-from controller_lab.checks.base import Check, Outcome, Phase
+from controller_lab.checks.base import Check, Outcome, Phase, gate_name, gate_prompt
 from controller_lab.detect import ControllerInfo
 from controller_lab.rig import RigResult
 from controller_lab.scoring import HONEST_LIMITS, RunScore
@@ -56,6 +56,9 @@ STATUS_TEXT = {
     "interrupted": ("Interrupted", RED),
 }
 CHECK_HINTS = "B / S  skip    R  redo    Esc  quit"
+# In a phase that tests B, B is input, so only S skips.
+CHECK_HINTS_B_INPUT = "S  skip    R  redo    Esc  quit"
+START_HINTS = "B / S  skip    Space  start    Esc  quit"
 END_METRICS = 8
 END_LINES = 10
 ISSUES_BOTTOM = 432
@@ -219,7 +222,8 @@ def label(
 
 def new_label(s: pygame.Surface, typed: str, suggestion: str, error: str) -> None:
     name = typed.strip()
-    primary = f"A / Enter  Save {name}" if name else f"A  Use {suggestion}"
+    # The primary keeps a fixed text while typing, so its box doesn't grow per character.
+    primary = "A / Enter  Save" if name else f"A  Use {suggestion}"
     _frame(s, 2, primary, "Backspace  delete    B / Esc  back")
     text(s, "Name this controller", (MARGIN, 76), 30)
     panel(s, (MARGIN, 120, 600, 50))
@@ -374,6 +378,33 @@ def _check_title(s: pygame.Surface, check: Check, index: int, total: int) -> Non
     text(s, f"Check {index + 1} of {total} · {check.title}", (MARGIN, 72), 30, GREY)
 
 
+def start(
+    s: pygame.Surface,
+    check: Check,
+    index: int,
+    total: int,
+    gate: str | None,
+    snap: Snapshot | None,
+) -> None:
+    """The full-screen start of a check: what it is, what to do, and the input that starts it.
+
+    The check starts only when that same input is pressed, then everything is let go.
+    """
+    prompt = gate_prompt(gate) if gate else "Press A to start"
+    _frame(s, 5, prompt, START_HINTS)
+    _check_title(s, check, index, total)
+    text(s, check.title, (MARGIN, 112), 44, INTRO_COLOUR)
+    about = check.brief or check.phases[0].prompt
+    y = 162
+    for line in _wrap(about, 26, WIDTH - 2 * MARGIN)[:3]:
+        text(s, line, (MARGIN, y), 26)
+        y += 30
+    if gate:
+        text(s, f"Uses {gate_name(gate)}.", (MARGIN, y + 4), 24, GREY)
+    if snap is not None:
+        draw_controller(s, VIEW_ORIGIN, snap, gate if gate and "+" not in gate else None)
+
+
 def check(
     s: pygame.Surface,
     check: Check,
@@ -383,26 +414,32 @@ def check(
     phase_index: int,
     seconds_left: float,
     fraction: float,
-    intro_left: float,
+    gate: str | None,
     elapsed: float,
     snap: Snapshot | None,
+    b_is_input: bool = False,
 ) -> None:
-    """A running check. For a timing check this is drawn once, and only the bar refreshes.
+    """A running check. For a timing check this is drawn once per phase or gate change, and
+    only the bar refreshes in between.
 
-    While `intro_left` is above zero, the phase's get-ready banner replaces the prompt.
-    `elapsed` is how long the phase has been counting, which moves a tracking target.
+    While `gate` is set, the phase waits for that input, and a gate card replaces the
+    prompt. `elapsed` is how long the phase has been counting, which moves a tracking
+    target. With `b_is_input`, B is part of the phase, so the hints offer only S to skip.
     """
-    if phase.answer:
+    if phase.answer and gate is None:
         _frame(s, 5, "A  Yes", "B  No    S  skip    Esc  quit")
+    elif gate is not None:
+        _frame(s, 5, gate_prompt(gate), CHECK_HINTS_B_INPUT if b_is_input else START_HINTS)
     else:
-        _frame(s, 5, "", CHECK_HINTS)
+        _frame(s, 5, "", CHECK_HINTS_B_INPUT if b_is_input else CHECK_HINTS)
     _check_title(s, check, index, total)
     parts = len(check.phases)
     if parts > 1 and not check.is_timing:
         text(s, f"{phase_index + 1} of {parts}", (WIDTH - MARGIN - 70, 76), 26, GREY)
-    if intro_left > 0:
-        text(s, phase.intro, (MARGIN, 112), 44, INTRO_COLOUR)
-        text(s, f"Get ready. Starts in {math.ceil(intro_left)} s.", (MARGIN, 165), 26, GREY)
+    if gate is not None:
+        heading = phase.intro or f"Now {gate_name(gate)}"
+        text(s, heading, (MARGIN, 112), 44, INTRO_COLOUR)
+        text(s, f"{gate_prompt(gate)}, then let go.", (MARGIN, 165), 26, GREY)
         _visual(s, phase, 0.0, snap)
         return
     text(s, phase.prompt, (MARGIN, 112), 36)
