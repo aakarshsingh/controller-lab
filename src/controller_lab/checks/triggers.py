@@ -57,7 +57,13 @@ def analyse(data: CheckData) -> Outcome:
         used += int(reach >= LET_GO / analysis.AXIS_MAX * 100)
     if used == 0:
         return Outcome("skipped", metrics, "The triggers weren't squeezed")
-    return Outcome("done", metrics)
+    lines = [
+        f"{name.upper()} rests at {metrics[f'{name}_rest'] / analysis.AXIS_MAX * 100:.0f}%,"
+        f" reaches {metrics[f'{name}_reach_pct']:.0f}%,"
+        f" biggest jump {metrics[f'{name}_max_jump_pct']:.0f}%"
+        for name in TRIGGERS
+    ]
+    return Outcome("done", metrics, lines=tuple(lines))
 
 
 CHECK = Check(
@@ -67,4 +73,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        f"Squeeze each trigger slowly all the way down, then let go, {SQUEEZES} times."
+        " LT, the left trigger, first, then RT. About 1 min."
+    ),
 )

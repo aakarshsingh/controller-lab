@@ -77,6 +77,10 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=_analyse(FULL_BUTTONS),
+    brief=(
+        f"Tap each button {TAPS} times, counting in your head: A, B, X, Y, LB, RB, View,"
+        " Menu, then click each stick in. The counter stays hidden. About 3 min."
+    ),
 )
 # The Connection suite taps A and B only. It shares the id, as only one runs per suite.
 CONNECTION_CHECK = Check(
@@ -86,4 +90,8 @@ CONNECTION_CHECK = Check(
     suites=frozenset({"connection"}),
     is_timing=False,
     analyse=_analyse(CONNECTION_BUTTONS),
+    brief=(
+        f"Tap A {TAPS} times, then B {TAPS} times, counting in your head. The counter"
+        " stays hidden. About 1 min."
+    ),
 )

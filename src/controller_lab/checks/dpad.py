@@ -66,13 +66,14 @@ def analyse(data: CheckData) -> Outcome:
         ghosts = analysis.dpad_ghosts(masks, neighbours)
         metrics[f"{name}_count"] = count
         metrics[f"{name}_ghosts"] = ghosts
-        lines.append(f"{name}: {count} of {TAPS}" + (f", {ghosts} ghost" if ghosts else ""))
+        ghost_text = f", {ghosts} ghost press{'es' if ghosts != 1 else ''}" if ghosts else ""
+        lines.append(f"{name.capitalize()}: {count} of {TAPS}{ghost_text}")
         activity += count
         ghosts_total += ghosts
     for j, (name, pair) in enumerate(DIAGONALS.items(), start=len(CARDINALS)):
         registered = analysis.diagonal_presses(data.samples[data.phase_rows(j), MASK], pair)
         metrics[f"{name}_registered"] = registered
-        lines.append(f"{name}: {registered} of {DIAGONAL_TAPS}")
+        lines.append(f"{name.capitalize()}: {registered} of {DIAGONAL_TAPS}")
         diagonals_total += registered
     metrics["ghosts_total"] = ghosts_total
     metrics["diagonals_registered"] = diagonals_total
@@ -89,4 +90,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        f"Tap the D-pad in the direction the arrow shows, {TAPS} times each, then each"
+        f" diagonal {DIAGONAL_TAPS} times. About 1 min."
+    ),
 )

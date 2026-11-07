@@ -26,7 +26,13 @@ def analyse(data: CheckData) -> Outcome:
     metrics = {**asdict(stats), "tool_gaps": len(data.tool_gaps)}
     if not stats.moving_s >= MIN_MOVING_S:
         return Outcome("voided", metrics, "Keep spinning, A to redo")
-    return Outcome("done", metrics)
+    gaps = stats.gaps_over_30ms
+    lines = (
+        f"{stats.rate_hz:.0f} reports a second, {stats.mean_ms:.1f} ms apart on average",
+        f"The slowest 1% took {stats.p99_ms:.1f} ms. Longest gap {stats.max_gap_ms:.0f} ms",
+        "No gaps over 30 ms" if gaps == 0 else f"{gaps} gap{'s' if gaps != 1 else ''} over 30 ms",
+    )
+    return Outcome("done", metrics, lines=lines)
 
 
 CHECK = Check(
@@ -34,14 +40,20 @@ CHECK = Check(
     title="Report timing",
     phases=(
         Phase(
-            "Push the left stick past half way to start",
+            "Start spinning the left stick",
             timeout_s=START_TIMEOUT_S,
             end=moved,
             timeout_ends_check=True,
+            gate="LS",
         ),
         Phase("Spin the left stick continuously", timeout_s=WINDOW_S, duration_s=WINDOW_S),
     ),
     suites=frozenset({"full", "connection"}),
     is_timing=True,
     analyse=analyse,
+    brief=(
+        f"Spin the left stick in circles, quickly and without stopping, for {WINDOW_S} s."
+        " Timing starts when it moves. This screen doesn't update while it measures."
+        " About 20 s."
+    ),
 )

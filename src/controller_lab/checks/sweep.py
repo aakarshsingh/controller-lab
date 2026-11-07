@@ -60,7 +60,15 @@ def analyse(data: CheckData) -> Outcome:
         metrics[f"{side}_max_jump_pct"] = round(jump, 3)
     if swept == 0:
         return Outcome("skipped", metrics, "The sticks weren't swept")
-    return Outcome("done", metrics)
+    lines = [
+        f"{side.capitalize()} stick: {metrics[f'{side}_distinct']} steps,"
+        f" {metrics[f'{side}_distinct_centre']} near centre,"
+        f" biggest jump {metrics[f'{side}_max_jump_pct']:.1f}%"
+        if metrics[f"{side}_swept"]
+        else f"{side.capitalize()} stick wasn't swept"
+        for side in STICKS
+    ]
+    return Outcome("done", metrics, lines=tuple(lines))
 
 
 CHECK = Check(
@@ -70,4 +78,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Move each stick slowly from far left to far right and back,"
+        f" {SWEEPS} times. Slow is what matters. Left stick, then right. About 1 min."
+    ),
 )

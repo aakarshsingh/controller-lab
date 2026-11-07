@@ -96,7 +96,18 @@ def analyse(data: CheckData) -> Outcome:
             metrics[f"{side}_spike_max_pct"] = round(float(np.max(spikes)), 3)
     if found == 0:
         return Outcome("skipped", metrics, "No pushes were detected")
-    return Outcome("done", metrics)
+    lines = []
+    for side in STICKS:
+        if f"{side}_settle_mean_pct" in metrics:
+            name = side.capitalize()
+            lines.append(
+                f"{name} stick settles {metrics[f'{side}_settle_mean_pct']:.1f}% off centre"
+                f" on average, {metrics[f'{side}_settle_max_pct']:.1f}% at worst"
+            )
+            lines.append(
+                f"{name} stick overshoots centre by up to {metrics[f'{side}_spike_max_pct']:.1f}%"
+            )
+    return Outcome("done", metrics, lines=tuple(lines))
 
 
 CHECK = Check(
@@ -106,4 +117,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Push each stick all the way in the direction the arrow shows, then let it spring"
+        " back. 8 directions, 3 rounds, left stick then right. About 2 min."
+    ),
 )

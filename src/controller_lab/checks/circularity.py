@@ -65,7 +65,13 @@ def analyse(data: CheckData) -> Outcome:
             metrics[f"{side}_ud_diff_pct"] = round(st.ud_diff_pct, 3)
     if covered == 0:
         return Outcome("skipped", metrics, "The sticks didn't reach the rim")
-    return Outcome("done", metrics)
+    lines = [
+        f"{side.capitalize()} stick: {metrics[f'{side}_circle_error_pct']:.1f}% circle error,"
+        f" weakest {metrics[f'{side}_weakest']}"
+        for side in STICKS
+        if f"{side}_circle_error_pct" in metrics
+    ]
+    return Outcome("done", metrics, lines=tuple(lines))
 
 
 CHECK = Check(
@@ -75,4 +81,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Roll each stick slowly round its rim, pressed against the edge the whole way,"
+        f" {ROTATIONS} times. Left stick, then right. About 1 min."
+    ),
 )
