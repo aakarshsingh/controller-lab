@@ -82,10 +82,11 @@ def analyse(data: CheckData) -> Outcome:
     if missed == len(ORDER):
         return Outcome("skipped", metrics, "No flicks were detected")
     lines = (
-        f"Right direction: {correct} of {len(ORDER)}",
-        f"Wrong direction: {wrong}",
-        f"Missed: {missed}",
-        f"Snapped back the wrong way: {snapbacks}",
+        f"{correct} of {len(ORDER)} flicks went the right way",
+        f"{wrong} went the wrong way, {missed} missed",
+        "No flick snapped back past centre"
+        if snapbacks == 0
+        else f"{snapbacks} flick{'s' if snapbacks != 1 else ''} snapped back past centre",
     )
     return Outcome("done", metrics, lines=lines)
 
@@ -97,4 +98,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Flick the right stick quickly in the direction the arrow shows, then let it"
+        f" spring back. {len(ORDER)} flicks. About 1 min."
+    ),
 )

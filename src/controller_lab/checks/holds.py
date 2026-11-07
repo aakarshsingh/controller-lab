@@ -93,14 +93,20 @@ def hold_for(hold: Hold):
     return until
 
 
+# A single-button hold names its button, so the live view rings it, and B is input
+# in the B hold instead of skip.
+SINGLE = {A: "A", B: "B", X: "X", Y: "Y"}
+
 PHASES = tuple(
     Phase(
         f"Hold {hold.label} for {hold.seconds:.0f} s",
         timeout_s=TIMEOUT_S,
         until=hold_for(hold),
         visual="controller",
+        focus=SINGLE.get(hold.buttons) if not (hold.lt or hold.rt or hold.stick) else None,
+        gate="LB+RB" if n == 0 else None,
     )
-    for hold in HOLDS
+    for n, hold in enumerate(HOLDS)
 )
 
 
@@ -137,4 +143,8 @@ CHECK = Check(
     suites=frozenset({"full", "connection"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Hold each combination shown until it counts, from LB + RB + LT + RT down to"
+        " each face button alone. Keep everything fully pressed. About 1 min."
+    ),
 )

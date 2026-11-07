@@ -25,7 +25,7 @@ def _unit(direction: str) -> tuple[float, float]:
 
 PHASES = (
     Phase(
-        "Hold RT fully down, and keep it there",
+        "Hold RT, the right trigger, all the way down, and keep it there",
         timeout_s=START_TIMEOUT_S,
         end=rt_held,
         visual="controller",
@@ -58,9 +58,12 @@ def analyse(data: CheckData) -> Outcome:
         "rt_sag_count": int(below[0]) + int((below[1:] & ~below[:-1]).sum()),
         "rt_dropouts": analysis.dropouts(t, rt >= HALF),
     }
+    sags = metrics["rt_sag_count"]
     lines = [
-        f"RT lowest: {metrics['rt_min_pct']:.0f}%",
-        f"RT sagged below 95%: {metrics['rt_sag_count']} times",
+        f"RT stayed above {metrics['rt_min_pct']:.0f}% while held",
+        "RT never sagged below 95%"
+        if sags == 0
+        else f"RT sagged below 95% {sags} time{'s' if sags != 1 else ''}",
     ]
     for i, direction in enumerate(ORDER, start=1):
         r = data.phase_rows(i)
@@ -68,7 +71,7 @@ def analyse(data: CheckData) -> Outcome:
         proj = data.samples[r, 0] * ux + data.samples[r, 1] * uy
         reach = float(max(0.0, proj.max())) / analysis.AXIS_MAX * 100 if proj.size else 0.0
         metrics[f"reach_{direction}_pct"] = round(reach, 3)
-        lines.append(f"Reach {direction}: {reach:.0f}%")
+        lines.append(f"Left stick reached {reach:.0f}% {direction}")
     return Outcome("done", metrics, lines=tuple(lines[:10]))
 
 
@@ -79,4 +82,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Hold RT, the right trigger, all the way down, then swing the left stick to"
+        " each direction the arrow shows while RT stays down. About 20 s."
+    ),
 )

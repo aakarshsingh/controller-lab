@@ -59,4 +59,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Hold the controller in both hands. Each motor buzzes for 1 s, then press A if"
+        " you felt it, or B if you didn't. Not scored. About 20 s."
+    ),
 )

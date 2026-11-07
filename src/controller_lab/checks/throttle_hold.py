@@ -73,7 +73,10 @@ def analyse(data: CheckData) -> Outcome:
         metrics[f"{key}_jitter_pct"] = round(jit, 4)
         metrics[f"{key}_distinct"] = int(np.unique(v).size)
         metrics[f"{key}_mean_pct"] = round(float(v.mean()) / analysis.AXIS_MAX * 100, 3)
-        lines.append(f"{level:.0%}: average {metrics[f'{key}_mean_pct']:.0f}%, jitter {jit:.2f}%")
+        lines.append(
+            f"At {level:.0%}: held {metrics[f'{key}_mean_pct']:.0f}% on average,"
+            f" wobbling {jit:.2f}%"
+        )
         # Join the holds end to end, so the 5 s segments cover holding time only.
         held_t.append(t - start + offset)
         held_v.append(v)
@@ -95,4 +98,8 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Squeeze RT, the right trigger, to the level marked on the gauge, and hold it"
+        f" steady for {HOLD_S} s. 25%, then 50%, then 75%. About 1 min."
+    ),
 )

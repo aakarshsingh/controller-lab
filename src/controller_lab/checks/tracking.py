@@ -20,8 +20,13 @@ GRID_NS = 10 * 10**6
 SEGMENT_NS = 5 * 10**9
 AMPLITUDE = 0.7
 CENTRE_AMPLITUDE = 0.2
-CENTRE_FROM_S, CENTRE_TO_S, RAMP_S = 16.0, 24.0, 1.0
+# The ramp into and out of the near-centre stretch takes 2 s, twice the first version,
+# so it moves at half speed too.
+CENTRE_FROM_S, CENTRE_TO_S, RAMP_S = 16.0, 24.0, 2.0
 MOVED = 0.1 * analysis.AXIS_MAX
+# The target's frequencies are drawn as before, then halved, so it moves at half
+# the first version's speed.
+SPEED = 0.5
 STICKS = {"left": (0, 1), "right": (2, 3)}
 
 
@@ -29,8 +34,8 @@ def _params() -> dict[str, tuple[float, float, float, float]]:
     rng = np.random.default_rng(SEED)
     return {
         side: (
-            float(rng.uniform(0.6, 0.9)),
-            float(rng.uniform(0.9, 1.3)),
+            float(rng.uniform(0.6, 0.9)) * SPEED,
+            float(rng.uniform(0.9, 1.3)) * SPEED,
             float(rng.uniform(0, 2 * math.pi)),
             float(rng.uniform(0, 2 * math.pi)),
         )
@@ -116,4 +121,9 @@ CHECK = Check(
     suites=frozenset({"full"}),
     is_timing=False,
     analyse=analyse,
+    brief=(
+        "Keep the green dot, your stick, on the yellow dot as it moves."
+        f" {DURATION_S} s with the left stick, then {DURATION_S} s with the right."
+        " Not scored, used in compare. About 1.5 min."
+    ),
 )
