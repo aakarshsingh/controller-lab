@@ -40,6 +40,13 @@ class Phase:
     use, such as "RS" or "LT", so the live view can ring it. `intro` is a get-ready
     banner shown for `INTRO_S` before the phase starts counting, used when a check
     moves to another stick or trigger.
+
+    `rumble` is (low, high, ms) for the body motors, started once the phase counts.
+    With `answer`, the phase waits for a yes or no: A or Enter means yes, B or
+    Backspace means no, and `S` still skips the check. `gauge` is a target level for
+    RT as a fraction of full, drawn on a gauge. `target(seconds)` gives a moving
+    target as (x, y) fractions of full, with y growing downwards like SDL, and
+    `cursor` names the stick, "left" or "right", that chases it.
     """
 
     prompt: str
@@ -51,6 +58,11 @@ class Phase:
     arrow: str | None = None
     focus: str | None = None
     intro: str = ""
+    rumble: tuple[float, float, int] | None = None
+    answer: bool = False
+    gauge: float | None = None
+    target: Callable[[float], tuple[float, float]] | None = None
+    cursor: str | None = None
     timeout_ends_check: bool = False
 
 
@@ -64,6 +76,11 @@ class CheckData:
     phase_starts_ns: tuple[int, ...]
     end_ns: int
     timed_out: bool
+    # Per phase: when it began counting, after any intro, what rumble() returned,
+    # and the yes or no answer. None where it doesn't apply or didn't happen.
+    counting_starts_ns: tuple[int, ...] = ()
+    rumble_ok: tuple[bool | None, ...] = ()
+    answers: tuple[bool | None, ...] = ()
 
     def phase_rows(self, index: int, extra_ns: int = 0) -> slice:
         """Rows that belong to phase `index`: the state held when it started, then every

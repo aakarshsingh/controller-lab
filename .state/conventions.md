@@ -171,3 +171,7 @@
   memory is short, so run long drivers in the foreground, under 10 min. A capture of a
   minimized window has zero size, so log it and carry on. Before an untouched run,
   confirm nobody is at the controller, because a person's input turns it into a hand run.
+- Phase timing: a phase with a duration ends on the first loop pass after it, about
+  1 ms late. Analysis that splits a phase into fixed windows must cap at the planned
+  length, or it gets a stray extra window. `rumble()` on Black over USB returns true
+  for both body motors.

@@ -57,7 +57,12 @@ STATUS_TEXT = {
 CHECK_HINTS = "B / S  skip    R  redo    Esc  quit"
 END_METRICS = 8
 END_LINES = 10
+RESULT_ROWS = 7
 INTRO_COLOUR = (246, 197, 32)
+AXIS_FULL = 32768
+GAUGE_BAND = 0.05
+TRACK_CENTRE = (WIDTH // 2, 378)
+TRACK_R = 105
 ARROW_CENTRE = (WIDTH - MARGIN - 50, 175)
 ARROW_R = 34
 
@@ -280,14 +285,17 @@ def results(
             22,
             GREEN if r.ok else RED,
         )
+    # A long suite goes in two columns, without the messages, to stay above the keys.
+    two = len(checks) > RESULT_ROWS
     for i, entry in enumerate(checks.values()):
-        y = 230 + i * 30
+        col, row = divmod(i, RESULT_ROWS) if two else (0, i)
+        x, y = MARGIN + col * 440, 228 + row * 28
         status, colour = STATUS_TEXT.get(entry["status"], (entry["status"], GREY))
-        text(s, entry["title"], (MARGIN, y), 26)
-        text(s, status, (300, y), 26, colour)
-        if entry["message"] and entry["status"] != "skipped":
-            text(s, entry["message"], (460, y + 3), 22, GREY)
-    y = 230 + len(checks) * 30 + 14
+        text(s, entry["title"], (x, y), 24)
+        text(s, status, (x + 210, y), 24, colour)
+        if not two and entry["message"] and entry["status"] != "skipped":
+            text(s, entry["message"], (x + 360, y + 2), 22, GREY)
+    y = 228 + min(len(checks), RESULT_ROWS) * 28 + 12
     text(s, "Scores and the verdict aren't built yet.", (MARGIN, y), 24, GREY)
 
 
@@ -305,13 +313,18 @@ def check(
     seconds_left: float,
     fraction: float,
     intro_left: float,
+    elapsed: float,
     snap: Snapshot | None,
 ) -> None:
     """A running check. For a timing check this is drawn once, and only the bar refreshes.
 
     While `intro_left` is above zero, the phase's get-ready banner replaces the prompt.
+    `elapsed` is how long the phase has been counting, which moves a tracking target.
     """
-    _frame(s, 5, "", CHECK_HINTS)
+    if phase.answer:
+        _frame(s, 5, "A  Yes", "B  No    S  skip    Esc  quit")
+    else:
+        _frame(s, 5, "", CHECK_HINTS)
     _check_title(s, check, index, total)
     parts = len(check.phases)
     if parts > 1 and not check.is_timing:
@@ -319,8 +332,7 @@ def check(
     if intro_left > 0:
         text(s, phase.intro, (MARGIN, 112), 44, INTRO_COLOUR)
         text(s, f"Get ready. Starts in {math.ceil(intro_left)} s.", (MARGIN, 165), 26, GREY)
-        if snap is not None and phase.visual == "controller":
-            draw_controller(s, VIEW_ORIGIN, snap, phase.focus)
+        _visual(s, phase, 0.0, snap)
         return
     text(s, phase.prompt, (MARGIN, 112), 36)
     if phase.arrow is not None:
@@ -340,8 +352,51 @@ def check(
     done.width = int(done.width * fraction)
     if done.width:
         panel(s, done, GREEN)
-    if snap is not None and phase.visual == "controller":
+    _visual(s, phase, elapsed, snap)
+
+
+def _visual(s: pygame.Surface, phase: Phase, elapsed: float, snap: Snapshot | None) -> None:
+    """The panel under the progress bar: the controller, a gauge, or a tracking target."""
+    if snap is None:
+        return
+    if phase.visual == "controller":
         draw_controller(s, VIEW_ORIGIN, snap, phase.focus)
+    elif phase.visual == "gauge" and phase.gauge is not None:
+        _gauge(s, snap[5] / AXIS_FULL, phase.gauge)
+    elif phase.visual == "tracking" and phase.target is not None:
+        side = 0 if phase.cursor == "left" else 2
+        _tracking(s, phase.target(elapsed), (snap[side] / AXIS_FULL, snap[side + 1] / AXIS_FULL))
+
+
+def _gauge(s: pygame.Surface, value: float, level: float) -> None:
+    """RT as a bar, with the target level and its ±5% band marked."""
+    bar = pygame.Rect(MARGIN, 300, WIDTH - 2 * MARGIN, 64)
+    panel(s, bar)
+    fill = bar.copy()
+    fill.width = int(bar.width * max(0.0, min(1.0, value)))
+    if fill.width:
+        panel(s, fill, GREEN)
+    band = pygame.Rect(0, bar.y - 8, int(bar.width * 2 * GAUGE_BAND), bar.height + 16)
+    band.centerx = bar.x + int(bar.width * level)
+    pygame.draw.rect(s, INTRO_COLOUR, band, 3, border_radius=6)
+    text(s, "0%", (bar.x, bar.bottom + 14), 22, GREY)
+    text(s, "100%", (bar.right - 44, bar.bottom + 14), 22, GREY)
+    text(s, f"Target {level:.0%}", (band.x, bar.bottom + 14), 26, INTRO_COLOUR)
+    text(s, f"RT now {value:.0%}", (MARGIN, 410), 30)
+
+
+def _tracking(s: pygame.Surface, target: tuple[float, float], stick: tuple[float, float]) -> None:
+    """A round field: the yellow target moves, and the green dot is the stick."""
+    cx, cy = TRACK_CENTRE
+    pygame.draw.circle(s, PANEL, TRACK_CENTRE, TRACK_R)
+    pygame.draw.circle(s, GREY, TRACK_CENTRE, TRACK_R, 2)
+    pygame.draw.circle(s, GREY, TRACK_CENTRE, round(TRACK_R * 0.25), 1)
+    tx, ty = target
+    pygame.draw.circle(s, INTRO_COLOUR, (cx + round(tx * TRACK_R), cy + round(ty * TRACK_R)), 11)
+    sx, sy = stick
+    pygame.draw.circle(s, GREEN, (cx + round(sx * TRACK_R), cy + round(sy * TRACK_R)), 7)
+    text(s, "Keep the green dot", (MARGIN, 330), 26, GREY)
+    text(s, "on the yellow one.", (MARGIN, 360), 26, GREY)
 
 
 def _arrow(s: pygame.Surface, centre: tuple[int, int], direction: str) -> None:

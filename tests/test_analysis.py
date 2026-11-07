@@ -4,10 +4,14 @@ from controller_lab.analysis import (
     button_presses,
     circle_stats,
     dpad_ghosts,
+    dropouts,
+    flick_result,
     intervals,
+    jitter,
     motion_start,
     noise_std,
     press_train,
+    segments,
     snapback,
     spin_timing,
     stick_offset,
@@ -212,3 +216,48 @@ def test_dpad_ghost_is_detected():
     masks = np.array([0, up, 0, up, up | left, up, 0])
     assert dpad_ghosts(masks, neighbours=left | (1 << 13)) == 1
     assert dpad_ghosts(np.array([0, up, 0, up, 0]), neighbours=left) == 0
+
+
+# ---- holds, flicks, throttle and tracking ---------------------------------
+
+
+def test_hold_with_one_20_ms_dropout_is_detected():
+    t = np.array([0, 100, 2100, 2120, 5000]) * MS
+    held = np.array([False, True, False, True, True])
+    assert dropouts(t, held) == 1
+    assert dropouts(np.array([0, 100, 5000]) * MS, np.array([False, True, True])) == 0
+
+
+def flick(overshoot):
+    """A right flick, released, then swinging `overshoot` past centre the other way."""
+    t = np.array([0, 50, 100, 140, 150, 160, 200, 400]) * MS
+    x = np.array([0, 20000, FULL, 12000, 0, -overshoot, -2000, 0])
+    return t, x, np.zeros_like(x)
+
+
+def test_flick_with_opposite_overshoot_past_the_deadzone_is_flagged():
+    direction, snapback_flag = flick_result(*flick(10000))
+    assert direction == "right"
+    assert snapback_flag
+
+
+def test_flick_that_stays_inside_the_deadzone_is_not_flagged():
+    direction, snapback_flag = flick_result(*flick(8000))
+    assert direction == "right"
+    assert not snapback_flag
+
+
+def test_segments_split_a_40_s_series_into_8_parts():
+    t = np.arange(0, 40_000, 10) * MS
+    parts = segments(t, 5_000 * MS)
+    assert len(parts) == 8
+    assert sum(p.stop - p.start for p in parts) == t.size
+
+
+def test_jitter_of_a_known_noisy_constant_matches_its_std():
+    rng = np.random.default_rng(3)
+    t = np.arange(0, 3_000, 8) * MS
+    noise = rng.normal(0, 200, t.size)
+    v = 16000 + noise
+    expected = noise.std() / FULL * 100
+    assert abs(jitter(t, v) - expected) / expected < 0.15

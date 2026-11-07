@@ -7,9 +7,15 @@ from controller_lab.checks import (
     centring,
     circularity,
     dpad,
+    haptics,
+    holds,
     idle_drift,
     report_timing,
+    skill_flicks,
+    sprint_turn,
     sweep,
+    throttle_hold,
+    tracking,
     triggers,
 )
 from controller_lab.checks.base import Check
@@ -23,7 +29,13 @@ ORDER: tuple[Check, ...] = (
     button_taps.CHECK,
     button_taps.CONNECTION_CHECK,
     dpad.CHECK,
+    holds.CHECK,
+    sprint_turn.CHECK,
+    skill_flicks.CHECK,
+    throttle_hold.CHECK,
     report_timing.CHECK,
+    haptics.CHECK,
+    tracking.CHECK,
 )
 SUITES = ("full", "connection")
 

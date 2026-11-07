@@ -131,6 +131,10 @@ class App:
         self.phase_end: EndCondition | None = None
         # A phase with an intro starts counting only once its get-ready banner is over.
         self.counting_from = 0
+        self.counting_starts: list[int] = []
+        self.phase_fired = False
+        self.rumble_ok: dict[int, bool] = {}
+        self.answers: dict[int, bool] = {}
         self.outcome: Outcome | None = None
         self.end_at = 0
         # Paused: why, and what to do once the controller is confirmed
@@ -254,7 +258,7 @@ class App:
     def act(self, action: str) -> None:
         state = self.state
         if state in RUN_STATES:
-            self.act_run("skip" if action == "b" else action)
+            self.act_run(action)
             return
         if action == "b":
             action = "back"
@@ -280,6 +284,13 @@ class App:
 
     def act_run(self, action: str) -> None:
         state = self.state
+        if state == Screen.CHECK and self.phase.answer and action in ("continue", "b", "back"):
+            # In an answer phase, A or Enter means yes and B or Backspace means no.
+            self.answers[self.phase_index] = action == "continue"
+            self.next_phase(time.perf_counter_ns())
+            return
+        if action == "b":
+            action = "skip"
         if state == Screen.CHECK:
             if action == "skip":
                 self.recorder = None
@@ -541,6 +552,9 @@ class App:
         self.recorder = Recorder(timing=check.is_timing)
         self.phase_index = 0
         self.phase_starts = []
+        self.counting_starts = []
+        self.rumble_ok = {}
+        self.answers = {}
         self.start_phase(time.perf_counter_ns())
         self.outcome = None
         self.go(Screen.CHECK)
@@ -549,6 +563,10 @@ class App:
         if now < self.counting_from:
             return
         phase, elapsed = self.phase, now - self.counting_from
+        if not self.phase_fired:
+            self.phase_fired = True
+            if phase.rumble is not None:
+                self.rumble_ok[self.phase_index] = self.start_rumble(*phase.rumble)
         snap = self.snap
         ended = snap is not None and (
             (phase.end is not None and phase.end(snap))
@@ -574,8 +592,19 @@ class App:
         """Begin the current phase, with a fresh end condition when it counts something."""
         self.phase_starts.append(now)
         self.counting_from = now + (int(INTRO_S * 1e9) if self.phase.intro else 0)
+        self.counting_starts.append(self.counting_from)
+        self.phase_fired = False
         until = self.phase.until
         self.phase_end = until(self.counting_from) if until is not None else None
+
+    def start_rumble(self, low: float, high: float, ms: int) -> bool:
+        """Run the body motors. Returns what SDL reports, or False when it can't."""
+        if self.gamepad is None:
+            return False
+        try:
+            return bool(self.gamepad.rumble(low, high, ms))
+        except pygame.error:
+            return False
 
     def finish_check(self, now: int, timed_out: bool) -> None:
         rec, self.recorder = self.recorder, None
@@ -587,6 +616,9 @@ class App:
             phase_starts_ns=tuple(self.phase_starts),
             end_ns=now,
             timed_out=timed_out,
+            counting_starts_ns=tuple(self.counting_starts),
+            rumble_ok=tuple(self.rumble_ok.get(i) for i in range(len(self.check.phases))),
+            answers=tuple(self.answers.get(i) for i in range(len(self.check.phases))),
         )
         self.outcome = self.check.analyse(data)
         self.save_samples(data)
@@ -687,6 +719,7 @@ class App:
             left,
             fraction,
             max(0, self.counting_from - now) / 1e9,
+            max(0, now - self.counting_from) / 1e9,
             None if self.check.is_timing else self.snap,
         )
 

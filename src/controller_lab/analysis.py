@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from itertools import pairwise
 
 import numpy as np
 
@@ -339,3 +340,104 @@ def diagonal_presses(masks: np.ndarray, pair: int) -> int:
     if both.size == 0:
         return 0
     return int(both[0]) + int((both[1:] & ~both[:-1]).sum())
+
+
+# ---- holds, flicks, throttle and tracking ---------------------------------
+
+DROPOUT_MAX_NS = 200 * NS_PER_MS  # a longer gap is the person letting go, not a dropout
+RIGHT_DEADZONE = 8689  # XInput's right stick deadzone
+FLICK_WINDOW_NS = 150 * NS_PER_MS
+JITTER_GRID_NS = NS_PER_MS
+JITTER_WINDOW = 100  # grid steps, so 100 ms
+
+
+def dropouts(t_ns: np.ndarray, held: np.ndarray, max_ns: int = DROPOUT_MAX_NS) -> int:
+    """Brief releases inside a hold: held, then not for under `max_ns`, then held again."""
+    t = np.asarray(t_ns, dtype=np.int64)
+    h = np.asarray(held, dtype=bool)
+    if h.size < 3:
+        return 0
+    change = np.flatnonzero(np.diff(h.astype(np.int8)) != 0) + 1
+    count = 0
+    for a, b in pairwise(change):
+        if not h[a] and h[b] and t[b] - t[a] < max_ns:
+            count += 1
+    return count
+
+
+def flick_result(
+    t_ns: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    deadzone: int = RIGHT_DEADZONE,
+    window_ns: int = FLICK_WINDOW_NS,
+) -> tuple[str | None, bool]:
+    """The direction a flick registered, and whether it snapped back the wrong way.
+
+    The direction is the 45° sector of the furthest reading. A wrong-direction
+    snapback is a reading opposite the flick beyond `deadzone`, within `window_ns` of
+    release. Release is the first reading back inside 30% after the furthest one.
+    Returns (None, False) when the stick never passed 80%.
+    """
+    t = np.asarray(t_ns, dtype=np.int64)
+    xf, yf = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    r = np.hypot(xf, yf)
+    if r.size == 0:
+        return None, False
+    peak = int(np.argmax(r))
+    if r[peak] < PUSH_RADIUS * AXIS_MAX:
+        return None, False
+    sector = int(np.round(_angles(xf[peak : peak + 1], yf[peak : peak + 1])[0] / 45)) % 8
+    after = np.flatnonzero(r[peak:] < RELEASE_RADIUS * AXIS_MAX)
+    if after.size == 0:
+        return DIRECTIONS[sector], False
+    rel = peak + int(after[0])
+    ux, uy = xf[peak] / r[peak], yf[peak] / r[peak]
+    window = (t >= t[rel]) & (t <= t[rel] + window_ns)
+    opposite = -(xf[window] * ux + yf[window] * uy)
+    return DIRECTIONS[sector], bool(opposite.size and opposite.max() > deadzone)
+
+
+def segments(t_ns: np.ndarray, seg_ns: int) -> list[slice]:
+    """Split a series into consecutive windows of `seg_ns` from its first sample."""
+    t = np.asarray(t_ns, dtype=np.int64)
+    if t.size == 0:
+        return []
+    n = int((t[-1] - t[0]) // seg_ns) + 1
+    edges = np.searchsorted(t, t[0] + np.arange(1, n) * seg_ns, side="left")
+    bounds = [0, *edges.tolist(), t.size]
+    return [slice(a, b) for a, b in pairwise(bounds) if b > a]
+
+
+def _step_grid(t_ns: np.ndarray, v: np.ndarray, step_ns: int) -> np.ndarray:
+    """Hold each value until the next change, sampled every `step_ns`."""
+    t = np.asarray(t_ns, dtype=np.int64)
+    grid = np.arange(t[0], t[-1], step_ns)
+    return np.asarray(v, dtype=np.float64)[np.searchsorted(t, grid, side="right") - 1]
+
+
+def jitter(t_ns: np.ndarray, values: np.ndarray) -> float:
+    """Fast jitter in % of full scale: the std left after a 100 ms moving average."""
+    t = np.asarray(t_ns, dtype=np.int64)
+    if t.size < 2:
+        return float("nan")
+    g = _step_grid(t, values, JITTER_GRID_NS)
+    w = JITTER_WINDOW
+    if g.size <= w:
+        return float("nan")
+    trend = np.convolve(g, np.ones(w) / w, mode="valid")
+    centred = g[w // 2 : w // 2 + trend.size]
+    return float((centred - trend).std()) / AXIS_MAX * 100
+
+
+def tracking_error(
+    t_ns: np.ndarray, x: np.ndarray, y: np.ndarray, tx: np.ndarray, ty: np.ndarray
+) -> np.ndarray:
+    """Distance from stick to target at each sample, in % of the full radius.
+
+    `tx` and `ty` are the target's position at each sample time, as fractions of
+    full, with y growing downwards like SDL.
+    """
+    sx = np.asarray(x, dtype=np.float64) / AXIS_MAX
+    sy = np.asarray(y, dtype=np.float64) / AXIS_MAX
+    return np.hypot(sx - np.asarray(tx), sy - np.asarray(ty)) * 100
