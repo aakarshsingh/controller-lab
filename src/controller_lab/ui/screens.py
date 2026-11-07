@@ -61,6 +61,7 @@ END_LINES = 10
 ISSUES_BOTTOM = 432
 NOTES_BOTTOM = 425
 SKIPPED_NAMED = 4
+RESULT_HINTS = "N  test another controller    C  compare    Esc  quit"
 VERDICT_COLOURS = {"Healthy": GREEN, "Minor issues": (246, 197, 32), "Faulty": RED}
 INTRO_COLOUR = (246, 197, 32)
 AXIS_FULL = 32768
@@ -271,7 +272,7 @@ def results(
     score: RunScore | None,
 ) -> None:
     """The verdict, the category table, the issues, the notes and the honest limits."""
-    _frame(s, 6, "A  Test another controller", "N  test another controller    Esc  quit")
+    _frame(s, 6, "A  Test another controller", RESULT_HINTS)
     if score is None:
         text(s, error or "The run wasn't saved, so it has no score.", (MARGIN, 80), 26, RED)
         if run_dir is not None:
@@ -284,7 +285,8 @@ def results(
         text(s, overall, (WIDTH - MARGIN - _width(overall, 36), 70), 36, colour)
     text(s, score.summary, (MARGIN, 108), 22, GREY)
     if run_dir is not None:
-        for i, line in enumerate(_wrap_path(str(run_dir), 18, WIDTH - 2 * MARGIN)[:2]):
+        report_path = str(run_dir / "report.html")
+        for i, line in enumerate(_wrap_path(report_path, 18, WIDTH - 2 * MARGIN)[:2]):
             text(s, line, (MARGIN, 136 + i * 17), 18, GREY)
     if error:
         text(s, error, (MARGIN, 170), 20, RED)
@@ -317,7 +319,7 @@ def results(
     for n, (item, item_colour) in enumerate(lines):
         parts = _wrap(item, 20, width)
         if y + 20 * len(parts) > ISSUES_BOTTOM:
-            text(s, f"and {len(lines) - n} more in metrics.json", (x, y), 20, GREY)
+            text(s, f"and {len(lines) - n} more in report.html", (x, y), 20, GREY)
             break
         for part in parts:
             text(s, part, (x, y), 20, item_colour)
@@ -342,6 +344,13 @@ def results(
         text(s, limit, (MARGIN, 446 + i * 17), 17, GREY)
     if rig_result is not None and not rig_result.ok:
         text(s, "This PC's polling loop was too slow for timing checks.", (MARGIN, 500), 18, RED)
+
+
+def writing(s: pygame.Surface, message: str) -> None:
+    """Shown while a report or comparison is written, which takes a few seconds."""
+    _frame(s, 6, "", "")
+    text(s, message, (MARGIN, 240), 36)
+    text(s, "This takes a few seconds.", (MARGIN, 290), 24, GREY)
 
 
 def _score_colour(score: float) -> tuple[int, int, int]:

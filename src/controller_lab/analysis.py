@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from itertools import pairwise
 
@@ -441,3 +442,37 @@ def tracking_error(
     sx = np.asarray(x, dtype=np.float64) / AXIS_MAX
     sy = np.asarray(y, dtype=np.float64) / AXIS_MAX
     return np.hypot(sx - np.asarray(tx), sy - np.asarray(ty)) * 100
+
+
+# ---- compare --------------------------------------------------------------
+
+
+def mann_whitney(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """Mann-Whitney U for `a` against `b`, with a two-sided p value.
+
+    Uses the normal approximation with a tie correction and a continuity
+    correction. Returns p = 1 when either sample is empty or every value is tied.
+    """
+    x = np.asarray(a, dtype=np.float64)
+    y = np.asarray(b, dtype=np.float64)
+    n1, n2 = x.size, y.size
+    if n1 == 0 or n2 == 0:
+        return float("nan"), 1.0
+    both = np.concatenate([x, y])
+    order = np.argsort(both, kind="mergesort")
+    ranks = np.empty(both.size)
+    ranks[order] = np.arange(1, both.size + 1)
+    values, inverse, counts = np.unique(both, return_inverse=True, return_counts=True)
+    # Tied values share the mean of their ranks.
+    sums = np.zeros(values.size)
+    np.add.at(sums, inverse, ranks)
+    ranks = (sums / counts)[inverse]
+    u = float(ranks[:n1].sum() - n1 * (n1 + 1) / 2)
+    n = n1 + n2
+    ties = float((counts**3 - counts).sum())
+    var = n1 * n2 / 12 * ((n + 1) - ties / (n * (n - 1)))
+    if var <= 0:
+        return u, 1.0
+    diff = abs(u - n1 * n2 / 2) - 0.5
+    z = max(diff, 0.0) / math.sqrt(var)
+    return u, math.erfc(z / math.sqrt(2))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+import webbrowser
 from dataclasses import asdict
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -14,7 +15,7 @@ import numpy as np
 import pygame
 from pygame._sdl2 import controller
 
-from controller_lab import devtree, history, rig, scoring
+from controller_lab import devtree, history, report, rig, scoring
 from controller_lab.checks import registry
 from controller_lab.checks.base import INTRO_S, Check, CheckData, EndCondition, Outcome, Phase
 from controller_lab.detect import ControllerInfo, controller_info
@@ -34,6 +35,8 @@ END_CARD_NS = 5 * 1_000_000_000
 SUITES = registry.SUITES
 SAMPLE_HEADER = "t_ns,lx,ly,rx,ry,lt,rt,buttons"
 SAMPLE_WIDTH = 7
+# What writing a report can raise: files, odd values in metrics.json, and matplotlib.
+REPORT_ERRORS = (OSError, ValueError, KeyError, TypeError, RuntimeError)
 DIFFERENT_CONTROLLER = "This looks like a different controller. Pick its label."
 
 
@@ -69,6 +72,7 @@ KEY_ACTIONS = {
     pygame.K_s: "skip",
     pygame.K_r: "redo",
     pygame.K_n: "next",
+    pygame.K_c: "compare",
 }
 BUTTON_ACTIONS = {
     pygame.CONTROLLER_BUTTON_A: "continue",
@@ -283,6 +287,8 @@ class App:
             self.go(Screen.RIG)
         elif state == Screen.RESULTS and action in ("continue", "next"):
             self.test_another()
+        elif state == Screen.RESULTS and action == "compare":
+            self.compare()
 
     def act_run(self, action: str) -> None:
         state = self.state
@@ -661,7 +667,27 @@ class App:
             runs = history.load_runs() if bt else None
             self.score = scoring.score_run(data, self.profile, runs)
         self.save_run_metrics()
+        if self.run_dir is not None:
+            self.show_writing("Writing report…")
+            try:
+                report.write_report(self.run_dir)
+            except REPORT_ERRORS as exc:  # a broken plot must not lose the run
+                self.save_error = f"Could not write the report: {exc}"
         self.go(Screen.RESULTS)
+
+    def show_writing(self, message: str) -> None:
+        screens.writing(self.surface, message)
+        pygame.display.flip()
+
+    def compare(self) -> None:
+        """Write compare.html from every run on this PC and open it in the browser."""
+        self.show_writing("Writing compare…")
+        try:
+            path = report.write_compare(history.results_root())
+            webbrowser.open(path.as_uri())
+        except REPORT_ERRORS as exc:  # show it on Results rather than crash
+            self.save_error = f"Could not write the comparison: {exc}"
+        self.last_frame = 0
 
     def record(self, outcome: Outcome) -> None:
         check = self.check

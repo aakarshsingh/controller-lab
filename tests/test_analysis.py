@@ -8,6 +8,7 @@ from controller_lab.analysis import (
     flick_result,
     intervals,
     jitter,
+    mann_whitney,
     motion_start,
     noise_std,
     press_train,
@@ -261,3 +262,18 @@ def test_jitter_of_a_known_noisy_constant_matches_its_std():
     v = 16000 + noise
     expected = noise.std() / FULL * 100
     assert abs(jitter(t, v) - expected) / expected < 0.15
+
+
+# ---- compare --------------------------------------------------------------
+
+
+def test_mann_whitney_finds_clearly_separated_samples_significant():
+    u, p = mann_whitney(np.arange(1, 9), np.arange(11, 19))
+    assert u == 0
+    assert p < 0.05
+
+
+def test_mann_whitney_finds_identical_distributions_not_significant():
+    a = np.array([3.1, 2.7, 3.4, 2.9, 3.0, 3.3, 2.8, 3.2])
+    _, p = mann_whitney(a, a.copy())
+    assert p > 0.05

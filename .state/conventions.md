@@ -178,3 +178,8 @@
 - Unattended runs, Phase 6: another terminal session on the same PC can take the
   foreground by itself, and the app then voids the running check, correctly. Before an
   untouched run, check what holds the foreground, and retry once if a check is voided.
+- Unattended runs, Phase 7: `webbrowser` splits `BROWSER` like a POSIX shell, so
+  backslashes in a Windows path vanish, and it then falls back to the real default
+  browser. Use forward slashes in a `BROWSER` override. Headless Edge,
+  `msedge --headless=new --user-data-dir=<scratch> --screenshot=<png> file:///...`,
+  captures HTML pages without opening a window.
