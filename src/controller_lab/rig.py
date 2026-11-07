@@ -16,10 +16,6 @@ SLEEP_S = 0.0005
 SPIN_WAIT = False
 PERIOD_NS = 1_000_000
 
-# These move to the profile in Phase 6.
-MEDIAN_LIMIT_MS = 1.5
-P99_LIMIT_MS = 4.0
-
 
 @dataclass(frozen=True)
 class RigResult:
@@ -38,8 +34,16 @@ def pace(pass_start_ns: int) -> None:
             pass
 
 
-def run_rig(loop: Callable[[], object], seconds: float = 5) -> RigResult:
-    """Run `loop` once per pass for `seconds`, paced like the app, and time it."""
+def run_rig(
+    loop: Callable[[], object],
+    median_limit_ms: float,
+    p99_limit_ms: float,
+    seconds: float = 5,
+) -> RigResult:
+    """Run `loop` once per pass for `seconds`, paced like the app, and time it.
+
+    The loop limits come from the controller's profile.
+    """
     passes: list[int] = []
     sleeps: list[int] = []
     end = time.perf_counter_ns() + int(seconds * 1e9)
@@ -59,5 +63,5 @@ def run_rig(loop: Callable[[], object], seconds: float = 5) -> RigResult:
         p99_ms=stats.p99_ms,
         sleep_ms=float(np.median(sleeps)) / NS_PER_MS,
         slow_passes=slow,
-        ok=stats.median_ms <= MEDIAN_LIMIT_MS and stats.p99_ms <= P99_LIMIT_MS,
+        ok=stats.median_ms <= median_limit_ms and stats.p99_ms <= p99_limit_ms,
     )

@@ -14,7 +14,7 @@ import numpy as np
 import pygame
 from pygame._sdl2 import controller
 
-from controller_lab import devtree, history, rig
+from controller_lab import devtree, history, rig, scoring
 from controller_lab.checks import registry
 from controller_lab.checks.base import INTRO_S, Check, CheckData, EndCondition, Outcome, Phase
 from controller_lab.detect import ControllerInfo, controller_info
@@ -124,6 +124,8 @@ class App:
         self.check_index = 0
         self.results: dict[str, dict[str, Any]] = {}
         self.connection_dropped = False
+        self.profile: scoring.Profile | None = None
+        self.score: scoring.RunScore | None = None
         # The check in progress
         self.recorder: Recorder | None = None
         self.phase_index = 0
@@ -508,7 +510,18 @@ class App:
     def run_rig(self) -> None:
         screens.rig(self.surface)
         pygame.display.flip()
-        self.rig_result = rig.run_rig(self.rig_pass)
+        self.score = None
+        try:
+            ctype = self.info.type if self.info is not None else ""
+            self.profile = scoring.load_profile(scoring.profile_for(ctype))
+        except scoring.ProfileError as exc:
+            self.profile = None
+            self.run_dir = None
+            self.save_error = f"Could not load the scoring profile: {exc}"
+            self.go(Screen.RESULTS)
+            return
+        p = self.profile
+        self.rig_result = rig.run_rig(self.rig_pass, p.loop_median_ms, p.loop_p99_ms)
         self.pending = [e for e in self.pending if e.type not in PRESS_EVENTS]
         self.start_run()
 
@@ -637,8 +650,18 @@ class App:
         if self.check_index < len(self.checks):
             self.begin_check()
         else:
-            self.save_run_metrics()
-            self.go(Screen.RESULTS)
+            self.finish_run()
+
+    def finish_run(self) -> None:
+        """Score the run, save it with its score, and show Results."""
+        if self.profile is not None and self.run_info is not None:
+            data = _clean(self.run_data())
+            # Bluetooth timing is judged against the other controllers on this PC.
+            bt = self.run_info.connection == "bluetooth"
+            runs = history.load_runs() if bt else None
+            self.score = scoring.score_run(data, self.profile, runs)
+        self.save_run_metrics()
+        self.go(Screen.RESULTS)
 
     def record(self, outcome: Outcome) -> None:
         check = self.check
@@ -660,10 +683,9 @@ class App:
         except OSError as exc:
             self.save_error = f"Could not save the samples: {exc}"
 
-    def save_run_metrics(self) -> None:
-        if self.run_dir is None or self.run_info is None:
-            return
-        data = {
+    def run_data(self) -> dict[str, Any]:
+        assert self.run_info is not None
+        return {
             "label": self.label,
             **asdict(self.run_info),
             "suite": self.suite,
@@ -672,6 +694,16 @@ class App:
             "connection_dropped": self.connection_dropped,
             "checks": self.results,
         }
+
+    def save_run_metrics(self) -> None:
+        if self.run_dir is None or self.run_info is None:
+            return
+        data = self.run_data()
+        if self.profile is not None:
+            data["profile"] = self.profile.key
+            data["profile_version"] = self.profile.version
+        if self.score is not None:
+            data["score"] = self.score.to_dict()
         try:
             history.save_metrics(self.run_dir, _clean(data))
         except OSError as exc:
@@ -751,7 +783,13 @@ class App:
             screens.focus_lost(s, self.check, self.check_index, len(self.checks))
         elif state == Screen.RESULTS:
             screens.results(
-                s, self.label, self.run_dir, self.save_error, self.rig_result, self.results
+                s,
+                self.label,
+                self.run_dir,
+                self.save_error,
+                self.rig_result,
+                self.results,
+                self.score,
             )
         elif info is None or state == Screen.WAITING:
             screens.waiting(s, self.error)

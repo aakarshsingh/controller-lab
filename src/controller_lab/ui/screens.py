@@ -17,6 +17,7 @@ from controller_lab.analysis import DIRECTIONS
 from controller_lab.checks.base import Check, Outcome, Phase
 from controller_lab.detect import ControllerInfo
 from controller_lab.rig import RigResult
+from controller_lab.scoring import HONEST_LIMITS, RunScore
 from controller_lab.source import Snapshot
 from controller_lab.ui.controller_view import FACE_COLOURS, draw_controller
 from controller_lab.ui.draw import BG, GREEN, GREY, PANEL, RED, WHITE, panel, text
@@ -57,7 +58,10 @@ STATUS_TEXT = {
 CHECK_HINTS = "B / S  skip    R  redo    Esc  quit"
 END_METRICS = 8
 END_LINES = 10
-RESULT_ROWS = 7
+ISSUES_BOTTOM = 432
+NOTES_BOTTOM = 425
+SKIPPED_NAMED = 4
+VERDICT_COLOURS = {"Healthy": GREEN, "Minor issues": (246, 197, 32), "Faulty": RED}
 INTRO_COLOUR = (246, 197, 32)
 AXIS_FULL = 32768
 GAUGE_BAND = 0.05
@@ -264,39 +268,97 @@ def results(
     error: str,
     rig_result: RigResult | None,
     checks: dict[str, dict[str, Any]],
+    score: RunScore | None,
 ) -> None:
+    """The verdict, the category table, the issues, the notes and the honest limits."""
     _frame(s, 6, "A  Test another controller", "N  test another controller    Esc  quit")
-    if run_dir is None:
-        text(s, error or "The run wasn't saved.", (MARGIN, 80), 26, RED)
-    else:
-        text(s, f"Run saved for {label_name}.", (MARGIN, 76), 30)
-        for i, line in enumerate(_wrap_path(str(run_dir), 22, WIDTH - 2 * MARGIN)[:3]):
-            text(s, line, (MARGIN, 114 + i * 22), 22, GREY)
-        if error:
-            text(s, error, (MARGIN, 166), 22, RED)
-    if rig_result is not None:
-        r = rig_result
-        verdict = "ok" if r.ok else "too slow, timing checks are not tested"
-        text(
-            s,
-            f"Rig  median {r.median_ms:.2f} ms   p99 {r.p99_ms:.2f} ms   "
-            f"slow passes {r.slow_passes}   {verdict}",
-            (MARGIN, 190),
-            22,
-            GREEN if r.ok else RED,
-        )
-    # A long suite goes in two columns, without the messages, to stay above the keys.
-    two = len(checks) > RESULT_ROWS
-    for i, entry in enumerate(checks.values()):
-        col, row = divmod(i, RESULT_ROWS) if two else (0, i)
-        x, y = MARGIN + col * 440, 228 + row * 28
-        status, colour = STATUS_TEXT.get(entry["status"], (entry["status"], GREY))
-        text(s, entry["title"], (x, y), 24)
-        text(s, status, (x + 210, y), 24, colour)
-        if not two and entry["message"] and entry["status"] != "skipped":
-            text(s, entry["message"], (x + 360, y + 2), 22, GREY)
-    y = 228 + min(len(checks), RESULT_ROWS) * 28 + 12
-    text(s, "Scores and the verdict aren't built yet.", (MARGIN, y), 24, GREY)
+    if score is None:
+        text(s, error or "The run wasn't saved, so it has no score.", (MARGIN, 80), 26, RED)
+        if run_dir is not None:
+            text(s, str(run_dir), (MARGIN, 120), 20, GREY)
+        return
+    colour = VERDICT_COLOURS.get(score.verdict, GREY)
+    text(s, f"{label_name}: {score.verdict}", (MARGIN, 70), 36, colour)
+    if score.overall is not None:
+        overall = f"Overall {score.overall:.0f}"
+        text(s, overall, (WIDTH - MARGIN - _width(overall, 36), 70), 36, colour)
+    text(s, score.summary, (MARGIN, 108), 22, GREY)
+    if run_dir is not None:
+        for i, line in enumerate(_wrap_path(str(run_dir), 18, WIDTH - 2 * MARGIN)[:2]):
+            text(s, line, (MARGIN, 136 + i * 17), 18, GREY)
+    if error:
+        text(s, error, (MARGIN, 170), 20, RED)
+
+    # Category table, left.
+    notes = []
+    for i, cat in enumerate(score.categories.values()):
+        y = 196 + i * 27
+        text(s, cat.title, (MARGIN, y), 24)
+        if cat.score is None:
+            text(s, "not tested", (MARGIN + 150, y), 22, GREY)
+            if cat.note and cat.note != "not tested":
+                notes.append(f"{cat.title}: {cat.note}")
+            continue
+        text(s, f"{cat.score:.0f}", (MARGIN + 150, y), 24, _score_colour(cat.score))
+        bar = pygame.Rect(MARGIN + 200, y + 4, 220, 12)
+        panel(s, bar)
+        done = bar.copy()
+        done.width = int(bar.width * cat.score / 100)
+        if done.width:
+            panel(s, done, _score_colour(cat.score))
+
+    # Issues, right. Auto-fails come first.
+    x, y, width = 490, 196, WIDTH - MARGIN - 490
+    text(s, "Issues", (x, y), 22, GREY)
+    y += 26
+    lines = [(t, RED) for t in score.auto_fails] + [(t, WHITE) for t in score.issues]
+    if not lines:
+        lines = [("No issues found.", GREEN)]
+    for n, (item, item_colour) in enumerate(lines):
+        parts = _wrap(item, 20, width)
+        if y + 20 * len(parts) > ISSUES_BOTTOM:
+            text(s, f"and {len(lines) - n} more in metrics.json", (x, y), 20, GREY)
+            break
+        for part in parts:
+            text(s, part, (x, y), 20, item_colour)
+            y += 20
+        y += 4
+
+    # Notes, skipped checks, then the honest limits, above the keys.
+    notes += score.notes
+    skipped = [e["title"] for e in checks.values() if e.get("status") != "done"]
+    if len(skipped) > SKIPPED_NAMED:
+        notes.append(f"Not done: {len(skipped)} of {len(checks)} checks.")
+    elif skipped:
+        notes.append(f"Not done: {', '.join(skipped)}.")
+    y = 368
+    for note in notes:
+        for part in _wrap(note, 18, 430):
+            if y > NOTES_BOTTOM:
+                break
+            text(s, part, (MARGIN, y), 18, GREY)
+            y += 17
+    for i, limit in enumerate(HONEST_LIMITS):
+        text(s, limit, (MARGIN, 446 + i * 17), 17, GREY)
+    if rig_result is not None and not rig_result.ok:
+        text(s, "This PC's polling loop was too slow for timing checks.", (MARGIN, 500), 18, RED)
+
+
+def _score_colour(score: float) -> tuple[int, int, int]:
+    return GREEN if score >= 80 else INTRO_COLOUR if score >= 60 else RED
+
+
+def _wrap(line: str, size: int, width: int) -> list[str]:
+    """Break text into lines at spaces so each fits in `width`."""
+    out, current = [], ""
+    for word in line.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if current and _width(candidate, size) > width:
+            out.append(current)
+            current = word
+        else:
+            current = candidate
+    return [*out, current] if current else out
 
 
 def _check_title(s: pygame.Surface, check: Check, index: int, total: int) -> None:

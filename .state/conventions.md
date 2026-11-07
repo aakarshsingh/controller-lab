@@ -175,3 +175,6 @@
   1 ms late. Analysis that splits a phase into fixed windows must cap at the planned
   length, or it gets a stray extra window. `rumble()` on Black over USB returns true
   for both body motors.
+- Unattended runs, Phase 6: another terminal session on the same PC can take the
+  foreground by itself, and the app then voids the running check, correctly. Before an
+  untouched run, check what holds the foreground, and retry once if a check is voided.

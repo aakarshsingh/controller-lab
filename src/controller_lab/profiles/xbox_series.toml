@@ -1,0 +1,334 @@
+# Thresholds for an Xbox Series controller. Each metric maps linearly from `good`
+# (100) to `bad` (0), clamped. Values are first estimates from Gamepadla's figures
+# and the maintainer's runs, and Phase 8 calibrates them.
+
+version = 1
+name = "Xbox Series"
+calibrated = true
+bluetooth_bad_ratio = 1.5
+
+[weights]
+left_stick = 25
+right_stick = 20
+triggers = 15
+buttons = 15
+dpad = 5
+connection = 20
+
+[loop]
+median_ms = 1.5
+p99_ms = 4.0
+
+[auto_fail]
+idle_offset_pct = 8.0
+settle_offset_pct = 12.0
+chatter = 0
+hold_dropouts = 0
+usb_max_gap_ms = 100.0
+bluetooth_drop = true
+
+# Gamepadla, Xbox Series over USB. Used to score USB timing.
+[reference.usb]
+mean_ms = 8.3
+max_ms = 12.2
+rate_hz = 111.0
+
+# Gamepadla, Xbox Series over Bluetooth. Context only: Bluetooth is judged against
+# other controllers on the same PC.
+[reference.bluetooth]
+mean_ms = 13.0
+max_ms = 20.9
+
+[deadzones]
+left = 7849
+right = 8689
+
+# ---- left stick -------------------------------------------------------------
+
+[[metric]]
+name = "left_idle_offset"
+source = "idle_drift.left_offset_pct"
+category = "left_stick"
+good = 3.0
+bad = 10.0
+
+[[metric]]
+name = "left_idle_noise"
+source = "idle_drift.left_noise_pct"
+category = "left_stick"
+good = 0.2
+bad = 1.5
+
+[[metric]]
+name = "left_settle_mean"
+source = "centring.left_settle_mean_pct"
+category = "left_stick"
+good = 2.0
+bad = 8.0
+
+[[metric]]
+name = "left_settle_max"
+source = "centring.left_settle_max_pct"
+category = "left_stick"
+good = 4.0
+bad = 12.0
+
+[[metric]]
+name = "left_snapback"
+source = "centring.left_spike_max_pct"
+category = "left_stick"
+good = 15.0
+bad = 50.0
+
+[[metric]]
+name = "left_circle_error"
+source = "circularity.left_circle_error_pct"
+category = "left_stick"
+good = 8.0
+bad = 20.0
+
+[[metric]]
+name = "left_reach_diff"
+source = "derived.left_reach_diff_pct"
+category = "left_stick"
+good = 3.0
+bad = 12.0
+
+[[metric]]
+name = "left_sweep_centre"
+source = "sweep.left_distinct_centre"
+category = "left_stick"
+good = 40.0
+bad = 10.0
+
+[[metric]]
+name = "left_sweep_jump"
+source = "sweep.left_max_jump_pct"
+category = "left_stick"
+good = 8.0
+bad = 30.0
+
+[[metric]]
+name = "sprint_reach"
+source = "derived.sprint_min_reach_pct"
+category = "left_stick"
+good = 95.0
+bad = 70.0
+
+# ---- right stick ------------------------------------------------------------
+
+[[metric]]
+name = "right_idle_offset"
+source = "idle_drift.right_offset_pct"
+category = "right_stick"
+good = 3.0
+bad = 10.0
+
+[[metric]]
+name = "right_idle_noise"
+source = "idle_drift.right_noise_pct"
+category = "right_stick"
+good = 0.2
+bad = 1.5
+
+[[metric]]
+name = "right_settle_mean"
+source = "centring.right_settle_mean_pct"
+category = "right_stick"
+good = 2.0
+bad = 8.0
+
+[[metric]]
+name = "right_settle_max"
+source = "centring.right_settle_max_pct"
+category = "right_stick"
+good = 4.0
+bad = 12.0
+
+[[metric]]
+name = "right_snapback"
+source = "centring.right_spike_max_pct"
+category = "right_stick"
+good = 15.0
+bad = 50.0
+
+[[metric]]
+name = "right_circle_error"
+source = "circularity.right_circle_error_pct"
+category = "right_stick"
+good = 8.0
+bad = 20.0
+
+[[metric]]
+name = "right_reach_diff"
+source = "derived.right_reach_diff_pct"
+category = "right_stick"
+good = 3.0
+bad = 12.0
+
+[[metric]]
+name = "right_sweep_centre"
+source = "sweep.right_distinct_centre"
+category = "right_stick"
+good = 40.0
+bad = 10.0
+
+[[metric]]
+name = "right_sweep_jump"
+source = "sweep.right_max_jump_pct"
+category = "right_stick"
+good = 8.0
+bad = 30.0
+
+[[metric]]
+name = "flick_wrong_direction"
+source = "skill_flicks.wrong_direction"
+category = "right_stick"
+good = 0.0
+bad = 3.0
+
+[[metric]]
+name = "flick_snapback"
+source = "skill_flicks.snapbacks"
+category = "right_stick"
+good = 0.0
+bad = 4.0
+
+# ---- triggers ---------------------------------------------------------------
+
+[[metric]]
+name = "lt_rest"
+source = "triggers.lt_rest"
+category = "triggers"
+good = 0.0
+bad = 1500.0
+
+[[metric]]
+name = "rt_rest"
+source = "triggers.rt_rest"
+category = "triggers"
+good = 0.0
+bad = 1500.0
+
+[[metric]]
+name = "lt_reach"
+source = "triggers.lt_reach_pct"
+category = "triggers"
+good = 99.0
+bad = 90.0
+
+[[metric]]
+name = "rt_reach"
+source = "triggers.rt_reach_pct"
+category = "triggers"
+good = 99.0
+bad = 90.0
+
+[[metric]]
+name = "lt_jump"
+source = "triggers.lt_max_jump_pct"
+category = "triggers"
+good = 10.0
+bad = 40.0
+
+[[metric]]
+name = "rt_jump"
+source = "triggers.rt_max_jump_pct"
+category = "triggers"
+good = 10.0
+bad = 40.0
+
+[[metric]]
+name = "rt_sag"
+source = "sprint_turn.rt_sag_count"
+category = "triggers"
+good = 0.0
+bad = 3.0
+
+[[metric]]
+name = "throttle_jitter"
+source = "derived.throttle_jitter_pct"
+category = "triggers"
+good = 0.3
+bad = 2.0
+
+# ---- buttons ----------------------------------------------------------------
+
+[[metric]]
+name = "stray_presses"
+source = "idle_drift.stray_presses"
+category = "buttons"
+good = 0.0
+bad = 2.0
+
+[[metric]]
+name = "tap_count_error"
+source = "derived.button_count_error"
+category = "buttons"
+good = 0.0
+bad = 3.0
+
+[[metric]]
+name = "tap_chatter"
+source = "button_taps.chatter_total"
+category = "buttons"
+good = 0.0
+bad = 1.0
+
+[[metric]]
+name = "hold_dropouts"
+source = "holds.dropouts_total"
+category = "buttons"
+good = 0.0
+bad = 1.0
+
+# ---- D-pad ------------------------------------------------------------------
+
+[[metric]]
+name = "dpad_ghosts"
+source = "dpad.ghosts_total"
+category = "dpad"
+good = 0.0
+bad = 2.0
+
+[[metric]]
+name = "dpad_diagonals"
+source = "derived.dpad_diagonal_ratio"
+category = "dpad"
+good = 1.0
+bad = 0.6
+
+# ---- connection, over USB ---------------------------------------------------
+# Bluetooth timing is scored in code against other controllers on this PC.
+
+[[metric]]
+name = "usb_mean"
+source = "report_timing.mean_ms"
+category = "connection"
+connection = "usb"
+good = 8.3
+bad = 16.0
+
+[[metric]]
+name = "usb_p99"
+source = "report_timing.p99_ms"
+category = "connection"
+connection = "usb"
+good = 12.2
+bad = 30.0
+
+[[metric]]
+name = "usb_rate"
+source = "report_timing.rate_hz"
+category = "connection"
+connection = "usb"
+good = 111.0
+bad = 60.0
+
+[[metric]]
+name = "usb_gaps"
+source = "report_timing.gaps_over_30ms"
+category = "connection"
+connection = "usb"
+good = 0.0
+bad = 5.0
