@@ -1,8 +1,4 @@
-"""Main loop and screen state machine.
-
-The report timing spike stays behind `T` on the Label screen until the check
-framework replaces it.
-"""
+"""Main loop and screen state machine."""
 
 from __future__ import annotations
 
@@ -12,12 +8,15 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pygame
 from pygame._sdl2 import controller
 
-from controller_lab import analysis, devtree, history, rig
-from controller_lab.analysis import TimingStats
+from controller_lab import devtree, history, rig
+from controller_lab.checks import registry
+from controller_lab.checks.base import Check, CheckData, Outcome, Phase
 from controller_lab.detect import ControllerInfo, controller_info
 from controller_lab.devtree import DeviceInfo
 from controller_lab.rig import RigResult
@@ -29,14 +28,13 @@ from controller_lab.ui.draw import GREEN, panel
 WINDOW = (960, 600)
 FRAME_NS = 1_000_000_000 // 60
 INFO_REFRESH_NS = 1_000_000_000
-TIMING_NS = 15 * 1_000_000_000
-NO_MOTION_NS = 30 * 1_000_000_000
-MIN_MOVING_S = 10.0
 PROGRESS_NS = 250_000_000
-PROGRESS_RECT = pygame.Rect(40, 300, 880, 30)
-MOTION_LIMIT = analysis.MOTION_RADIUS * analysis.AXIS_MAX
 QUIT_CONFIRM_NS = 3 * 1_000_000_000
-SUITES = ("full", "connection")
+END_CARD_NS = 5 * 1_000_000_000
+SUITES = registry.SUITES
+SAMPLE_HEADER = "t_ns,lx,ly,rx,ry,lt,rt,buttons"
+SAMPLE_WIDTH = 7
+DIFFERENT_CONTROLLER = "This looks like a different controller. Pick its label."
 
 
 class Screen(StrEnum):
@@ -47,10 +45,18 @@ class Screen(StrEnum):
     SUITE = "suite"
     SETUP = "setup"
     RIG = "rig"
+    CHECK = "check"
+    CHECK_END = "check_end"
+    FOCUS_LOST = "focus_lost"
+    PAUSED = "paused"
     RESULTS = "results"
 
 
-# B and Backspace go back one screen before the checks start.
+# A run is in progress in these states. Device events pause it instead of resetting.
+RUN_STATES = {Screen.CHECK, Screen.CHECK_END, Screen.FOCUS_LOST, Screen.PAUSED}
+# The device tree is never read in these states, so it can't delay sampling.
+NO_DEVTREE = {Screen.RIG, Screen.CHECK, Screen.CHECK_END, Screen.FOCUS_LOST}
+# Backspace goes back one screen before the checks start. B does too, and skips during them.
 BACK = {Screen.SUITE: Screen.LABEL, Screen.SETUP: Screen.SUITE}
 
 KEY_ACTIONS = {
@@ -63,16 +69,26 @@ KEY_ACTIONS = {
     pygame.K_s: "skip",
     pygame.K_r: "redo",
     pygame.K_n: "next",
-    pygame.K_t: "timing",
 }
 BUTTON_ACTIONS = {
     pygame.CONTROLLER_BUTTON_A: "continue",
-    pygame.CONTROLLER_BUTTON_B: "back",
+    pygame.CONTROLLER_BUTTON_B: "b",
     pygame.CONTROLLER_BUTTON_DPAD_UP: "up",
     pygame.CONTROLLER_BUTTON_DPAD_DOWN: "down",
 }
 # A press made during the rig check must not act on the screen that follows it.
 PRESS_EVENTS = (pygame.KEYDOWN, pygame.CONTROLLERBUTTONDOWN, pygame.TEXTINPUT)
+
+
+def _clean(value: Any) -> Any:
+    """Make metrics JSON-safe: NaN and infinity become None."""
+    if isinstance(value, dict):
+        return {k: _clean(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_clean(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 class App:
@@ -94,19 +110,29 @@ class App:
         self.cursor = 0
         self.suite = SUITES[0]
         self.label = ""
+        self.label_note = ""
         self.typed = ""
         self.suggestion = ""
         self.label_error = ""
-        # Rig and the saved run
+        # The run
         self.rig_result: RigResult | None = None
         self.run_dir: Path | None = None
+        self.run_info: ControllerInfo | None = None
+        self.started_at = ""
         self.save_error = ""
-        # Report timing spike
-        self.timing_result: tuple[TimingStats, int] | None = None
-        self.timing_note = ""
+        self.checks: list[Check] = []
+        self.check_index = 0
+        self.results: dict[str, dict[str, Any]] = {}
+        self.connection_dropped = False
+        # The check in progress
         self.recorder: Recorder | None = None
-        self.timing_start = 0
-        self.motion_ns: int | None = None
+        self.phase_index = 0
+        self.phase_starts: list[int] = []
+        self.outcome: Outcome | None = None
+        self.end_at = 0
+        # Paused: why, and what to do once the controller is confirmed
+        self.pause_reason = ""
+        self.resume_redo = True
         self.last_frame = 0
         self.last_progress = 0
         self.last_info = 0
@@ -136,11 +162,14 @@ class App:
                 self.snap = self.read()
                 if self.recorder is not None and self.snap is not None:
                     self.recorder.add(t, self.snap)
-                    if self.motion_ns is None and math.hypot(*self.snap[:2]) > MOTION_LIMIT:
-                        self.motion_ns = t
 
-            if self.recorder is not None:
-                self.tick_timing(now)
+            if self.state == Screen.CHECK:
+                self.tick_check(now)
+            elif self.state == Screen.CHECK_END:
+                self.tick_end_card(now)
+
+            if self.state == Screen.CHECK and self.check.is_timing:
+                self.render_timing(now)
             elif now - self.last_frame >= FRAME_NS:
                 self.last_frame = now
                 self.render(now)
@@ -161,6 +190,14 @@ class App:
         self.state = state
         self.last_frame = 0
 
+    @property
+    def check(self) -> Check:
+        return self.checks[self.check_index]
+
+    @property
+    def phase(self) -> Phase:
+        return self.check.phases[self.phase_index]
+
     # ---- events ----------------------------------------------------------
 
     def handle(self, event: pygame.event.Event) -> None:
@@ -173,30 +210,21 @@ class App:
                 self.typed = (self.typed + event.text)[: history.MAX_LABEL]
                 self.label_error = ""
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            self.quit_asked_at = None
+            self.close_quit_confirm()
+        elif event.type == pygame.WINDOWFOCUSLOST:
+            if self.state == Screen.CHECK:
+                self.focus_lost()
         elif event.type == pygame.CONTROLLERBUTTONDOWN:
             ours = self.gamepad is not None and event.instance_id == self.gamepad.instance_id
             if ours and not self.close_quit_confirm() and event.button in BUTTON_ACTIONS:
                 self.act(BUTTON_ACTIONS[event.button])
         elif event.type == pygame.CONTROLLERDEVICEADDED:
-            if controller.get_count() > 1:
-                self.block_extra()
-            elif self.gamepad is None:
-                self.connect(event.device_index)
+            self.on_added(event.device_index)
         elif event.type == pygame.CONTROLLERDEVICEREMOVED:
-            if self.gamepad is not None and event.instance_id == self.gamepad.instance_id:
-                self.disconnect()
-                self.go(Screen.WAITING)
-            elif self.state == Screen.ONE_ONLY and controller.get_count() <= 1:
-                self.go(Screen.WAITING)
-                if controller.get_count() == 1:
-                    self.connect(0)
+            self.on_removed(event.instance_id)
 
     def handle_key(self, key: int) -> None:
-        if self.recorder is not None:
-            if key == pygame.K_ESCAPE:
-                self.cancel_timing()
-        elif self.state == Screen.NEW_LABEL:
+        if self.state == Screen.NEW_LABEL:
             self.edit_label(key)
         elif key == pygame.K_ESCAPE:
             self.ask_quit()
@@ -221,9 +249,12 @@ class App:
         return was_open
 
     def act(self, action: str) -> None:
-        if self.recorder is not None:
-            return
         state = self.state
+        if state in RUN_STATES:
+            self.act_run("skip" if action == "b" else action)
+            return
+        if action == "b":
+            action = "back"
         if action == "back" and state in BACK:
             self.go(BACK[state])
         elif state == Screen.LABEL:
@@ -244,14 +275,39 @@ class App:
         elif state == Screen.RESULTS and action in ("continue", "next"):
             self.test_another()
 
+    def act_run(self, action: str) -> None:
+        state = self.state
+        if state == Screen.CHECK:
+            if action == "skip":
+                self.recorder = None
+                self.record(Outcome("skipped", message="Skipped"))
+                self.advance()
+            elif action == "redo":
+                self.begin_check()
+        elif state == Screen.CHECK_END:
+            assert self.outcome is not None
+            voided = self.outcome.status == "voided"
+            if action == "redo" or (voided and action == "continue"):
+                self.begin_check()
+            elif action == "continue" or (voided and action == "skip"):
+                self.advance()
+        elif state == Screen.FOCUS_LOST:
+            if action in ("continue", "redo"):
+                self.begin_check()
+            elif action == "skip":
+                self.advance()
+        elif state == Screen.PAUSED and self.pause_reason == "confirm":
+            if action == "continue":
+                self.resume()
+            elif action == "skip":
+                self.abandon_run(different=False)
+
     def act_label(self, action: str) -> None:
         new_row = len(self.labels)
         if action == "up":
             self.cursor = max(0, self.cursor - 1)
         elif action == "down":
             self.cursor = min(new_row, self.cursor + 1)
-        elif action == "timing" and self.gamepad is not None:
-            self.start_timing()
         elif action == "continue":
             if self.cursor == new_row:
                 self.suggestion = history.next_default_label()
@@ -283,9 +339,43 @@ class App:
 
     def choose_label(self, label: str) -> None:
         self.label = label
+        self.label_note = ""
         connection = self.info.connection if self.info is not None else "usb"
         self.suite = "full" if connection == "usb" else "connection"
         self.go(Screen.SUITE)
+
+    # ---- controllers -----------------------------------------------------
+
+    def on_added(self, device_index: int) -> None:
+        if self.state in RUN_STATES:
+            if controller.get_count() > 1:
+                self.interrupt("one_only")
+            elif self.gamepad is None:
+                self.reconnect(device_index)
+        elif controller.get_count() > 1:
+            self.block_extra()
+        elif self.gamepad is None:
+            self.connect(device_index)
+
+    def on_removed(self, instance_id: int) -> None:
+        ours = self.gamepad is not None and instance_id == self.gamepad.instance_id
+        if self.state in RUN_STATES:
+            if ours:
+                self.interrupt("removed")
+            elif self.gamepad is None and self.pause_reason == "one_only":
+                count = controller.get_count()
+                if count == 1:
+                    self.reconnect(0)
+                elif count == 0:
+                    self.pause_reason = "removed"
+                    self.last_frame = 0
+        elif ours:
+            self.disconnect()
+            self.go(Screen.WAITING)
+        elif self.state == Screen.ONE_ONLY and controller.get_count() <= 1:
+            self.go(Screen.WAITING)
+            if controller.get_count() == 1:
+                self.connect(0)
 
     def block_extra(self) -> None:
         """More than one controller is attached: test nothing until one is left."""
@@ -303,23 +393,30 @@ class App:
             self.info = controller_info(self.gamepad, self.read_devices(), self.connected_at)
             self.last_info = time.perf_counter_ns()
 
-    def connect(self, device_index: int) -> None:
+    def open_gamepad(self, device_index: int) -> bool:
         try:
             self.gamepad = Gamepad(device_index)
         except pygame.error as exc:
             self.error = f"Could not open the controller: {exc}"
-            return
+            return False
         self.error = ""
         self.connected_at = datetime.now(UTC)
         self.refresh_info()
+        return self.info is not None
+
+    def connect(self, device_index: int) -> None:
+        if self.open_gamepad(device_index):
+            self.label_note = ""
+            self.enter_label()
+
+    def enter_label(self) -> None:
         assert self.info is not None
         self.labels = history.list_labels()
         self.preselected = history.label_for_device(self.info.device_key)
         names = [name for name, _ in self.labels]
         self.cursor = names.index(self.preselected) if self.preselected in names else len(names)
         self.suite = SUITES[0]
-        self.rig_result = self.timing_result = None
-        self.timing_note = ""
+        self.rig_result = None
         self.go(Screen.LABEL)
 
     def disconnect(self) -> None:
@@ -327,8 +424,6 @@ class App:
             self.gamepad.close()
         self.gamepad = self.info = self.snap = None
         self.recorder = None
-        self.rig_result = self.timing_result = None
-        self.timing_note = ""
 
     def test_another(self) -> None:
         self.disconnect()
@@ -339,6 +434,61 @@ class App:
         elif count == 1:
             self.connect(0)
 
+    # ---- interruptions ---------------------------------------------------
+
+    def interrupt(self, reason: str) -> None:
+        """Pause the run. A check that was running starts again on resume."""
+        if self.state != Screen.PAUSED:
+            # After a finished check, resume moves on. Otherwise the check runs again.
+            self.resume_redo = self.state != Screen.CHECK_END
+        if self.state == Screen.CHECK:
+            self.recorder = None
+            run = self.run_info
+            if reason == "removed" and run is not None and run.connection == "bluetooth":
+                self.connection_dropped = True
+                self.save_run_metrics()
+        self.disconnect()
+        self.pause_reason = reason
+        self.go(Screen.PAUSED)
+
+    def reconnect(self, device_index: int) -> None:
+        """A controller came back during a run: wait for the run's connection, then check it."""
+        if not self.open_gamepad(device_index):
+            return
+        assert self.info is not None and self.run_info is not None
+        new, run = self.info, self.run_info
+        if new.connection != run.connection:
+            self.pause_reason = "other_connection"
+        elif new.device_key and run.device_key and new.device_key != run.device_key:
+            self.abandon_run(different=True)
+            return
+        else:
+            self.pause_reason = "confirm"
+        self.last_frame = 0
+
+    def resume(self) -> None:
+        self.pause_reason = ""
+        if self.resume_redo:
+            self.begin_check()
+        else:
+            self.advance()
+
+    def abandon_run(self, different: bool) -> None:
+        """Keep what the run saved, mark the interrupted check, and pick a label again."""
+        if self.resume_redo and self.checks and self.check.id not in self.results:
+            self.record(Outcome("interrupted", message="The controller disconnected"))
+        self.save_run_metrics()
+        self.checks = []
+        self.pause_reason = ""
+        self.label_note = DIFFERENT_CONTROLLER if different else ""
+        self.enter_label()
+
+    def focus_lost(self) -> None:
+        self.recorder = None
+        self.record(Outcome("voided", message="Focus was lost"))
+        self.save_run_metrics()
+        self.go(Screen.FOCUS_LOST)
+
     # ---- rig and run -----------------------------------------------------
 
     def run_rig(self) -> None:
@@ -346,83 +496,211 @@ class App:
         pygame.display.flip()
         self.rig_result = rig.run_rig(self.rig_pass)
         self.pending = [e for e in self.pending if e.type not in PRESS_EVENTS]
-        self.save_run()
+        self.start_run()
 
     def rig_pass(self) -> None:
         self.pending.extend(pygame.event.get())
         self.read()
 
-    def save_run(self) -> None:
-        """Save an empty run. Checks fill it in once they exist."""
+    def start_run(self) -> None:
         self.refresh_info()
         if self.info is None:
             self.go(Screen.WAITING)
             return
+        self.run_info = self.info
+        self.checks = registry.suite(self.suite)
+        self.check_index = 0
+        self.results = {}
+        self.connection_dropped = False
+        self.started_at = datetime.now().astimezone().isoformat(timespec="seconds")
         try:
             self.run_dir = history.new_run_dir(self.label, self.info.connection)
-            history.save_metrics(self.run_dir, {"label": self.label, **asdict(self.info)})
             self.save_error = ""
         except (OSError, ValueError) as exc:
             self.run_dir = None
             self.save_error = f"Could not save the run: {exc}"
-        self.go(Screen.RESULTS)
-
-    # ---- report timing spike ---------------------------------------------
-
-    def start_timing(self) -> None:
-        self.recorder = Recorder(timing=True)
-        self.timing_start = self.last_progress = time.perf_counter_ns()
-        self.motion_ns = None
-        self.timing_note = ""
-        screens.timing_prompt(self.surface, PROGRESS_RECT)
-        pygame.display.flip()
-
-    def cancel_timing(self) -> None:
-        """`Esc` during the spike drops the measurement and returns to Label."""
-        self.recorder = None
-        self.timing_note = ""
-        self.last_frame = 0
-
-    def tick_timing(self, now: int) -> None:
-        if self.motion_ns is None:
-            if now - self.timing_start >= NO_MOTION_NS:
-                self.recorder = None
-                self.timing_result = None
-                self.timing_note = "No movement, T to try again"
-                self.last_frame = 0
+            self.go(Screen.RESULTS)
             return
-        elapsed = now - self.motion_ns
-        if elapsed >= TIMING_NS:
-            self.finish_timing()
-            return
-        if now - self.last_progress >= PROGRESS_NS:
-            self.last_progress = now
-            done = PROGRESS_RECT.copy()
-            done.width = int(PROGRESS_RECT.width * elapsed / TIMING_NS)
-            panel(self.surface, done, GREEN)
-            pygame.display.update(PROGRESS_RECT)
+        self.save_run_metrics()
+        if self.checks:
+            self.begin_check()
+        else:
+            self.go(Screen.RESULTS)
 
-    def finish_timing(self) -> None:
+    def begin_check(self) -> None:
+        check = self.check
+        if check.is_timing and not (self.rig_result is not None and self.rig_result.ok):
+            self.record(Outcome("not_tested", message="This PC's polling loop was too slow"))
+            self.save_run_metrics()
+            self.advance()
+            return
+        self.results.pop(check.id, None)
+        self.recorder = Recorder(timing=check.is_timing)
+        self.phase_index = 0
+        self.phase_starts = [time.perf_counter_ns()]
+        self.outcome = None
+        self.go(Screen.CHECK)
+
+    def tick_check(self, now: int) -> None:
+        phase, elapsed = self.phase, now - self.phase_starts[-1]
+        ended = phase.end is not None and self.snap is not None and phase.end(self.snap)
+        if ended or (phase.duration_s is not None and elapsed >= phase.duration_s * 1e9):
+            self.next_phase(now)
+        elif elapsed >= phase.timeout_s * 1e9:
+            if phase.timeout_ends_check:
+                self.finish_check(now, timed_out=True)
+            else:
+                self.next_phase(now)
+
+    def next_phase(self, now: int) -> None:
+        self.phase_index += 1
+        if self.phase_index == len(self.check.phases):
+            self.finish_check(now, timed_out=False)
+        else:
+            self.phase_starts.append(now)
+            self.last_frame = 0
+
+    def finish_check(self, now: int, timed_out: bool) -> None:
         rec, self.recorder = self.recorder, None
         assert rec is not None
-        gaps = rec.tool_gaps
-        samples = rec.samples
-        stats = analysis.spin_timing(rec.t_ns, samples[:, 0], samples[:, 1], gaps, TIMING_NS)
-        self.timing_result = (stats, len(gaps))
-        moving = stats.moving_s
-        self.timing_note = "Keep spinning, T to redo" if not moving >= MIN_MOVING_S else ""
-        self.last_frame = 0
+        data = CheckData(
+            t_ns=rec.t_ns,
+            samples=rec.samples.reshape(-1, SAMPLE_WIDTH),
+            tool_gaps=rec.tool_gaps,
+            phase_starts_ns=tuple(self.phase_starts),
+            end_ns=now,
+            timed_out=timed_out,
+        )
+        self.outcome = self.check.analyse(data)
+        self.save_samples(data)
+        self.record(self.outcome)
+        self.save_run_metrics()
+        self.end_at = now
+        self.go(Screen.CHECK_END)
+
+    def tick_end_card(self, now: int) -> None:
+        voided = self.outcome is not None and self.outcome.status == "voided"
+        if not voided and now - self.end_at >= END_CARD_NS:
+            self.advance()
+
+    def advance(self) -> None:
+        self.check_index += 1
+        if self.check_index < len(self.checks):
+            self.begin_check()
+        else:
+            self.save_run_metrics()
+            self.go(Screen.RESULTS)
+
+    def record(self, outcome: Outcome) -> None:
+        check = self.check
+        self.results[check.id] = {
+            "title": check.title,
+            "status": outcome.status,
+            "message": outcome.message,
+            "metrics": outcome.metrics,
+        }
+
+    def save_samples(self, data: CheckData) -> None:
+        if self.run_dir is None:
+            return
+        path = self.run_dir / "samples" / f"{self.check.id}.csv"
+        table = np.column_stack([data.t_ns, data.samples]).astype(np.int64)
+        try:
+            path.parent.mkdir(exist_ok=True)
+            np.savetxt(path, table, fmt="%d", delimiter=",", header=SAMPLE_HEADER, comments="")
+        except OSError as exc:
+            self.save_error = f"Could not save the samples: {exc}"
+
+    def save_run_metrics(self) -> None:
+        if self.run_dir is None or self.run_info is None:
+            return
+        data = {
+            "label": self.label,
+            **asdict(self.run_info),
+            "suite": self.suite,
+            "started_at": self.started_at,
+            "rig": asdict(self.rig_result) if self.rig_result is not None else None,
+            "connection_dropped": self.connection_dropped,
+            "checks": self.results,
+        }
+        try:
+            history.save_metrics(self.run_dir, _clean(data))
+        except OSError as exc:
+            self.save_error = f"Could not save the run: {exc}"
 
     # ---- drawing ---------------------------------------------------------
 
+    def phase_progress(self, now: int) -> tuple[float, float]:
+        """Seconds left in the phase, and the fraction done."""
+        phase = self.phase
+        limit = phase.duration_s if phase.duration_s is not None else phase.timeout_s
+        elapsed = (now - self.phase_starts[-1]) / 1e9
+        return max(0.0, limit - elapsed), min(1.0, elapsed / limit)
+
+    def render_timing(self, now: int) -> None:
+        """During a timing check, draw once, then refresh only the progress bar."""
+        if self.quit_asked_at is not None and now - self.quit_asked_at > QUIT_CONFIRM_NS:
+            self.quit_asked_at = None
+            self.last_frame = 0
+        if self.last_frame == 0:
+            self.last_frame = self.last_progress = now
+            self.draw_check(now)
+            if self.quit_asked_at is not None:
+                screens.quit_overlay(self.surface)
+            pygame.display.flip()
+        elif now - self.last_progress >= PROGRESS_NS:
+            self.last_progress = now
+            # Only the spin phase fills the bar. While waiting for movement it stays empty.
+            fraction = self.phase_progress(now)[1] if self.phase.duration_s else 0.0
+            done = screens.PROGRESS_RECT.copy()
+            done.width = int(done.width * fraction)
+            if done.width:
+                panel(self.surface, done, GREEN)
+            pygame.display.update(screens.PROGRESS_RECT)
+
+    def draw_check(self, now: int) -> None:
+        left, fraction = self.phase_progress(now)
+        screens.check(
+            self.surface,
+            self.check,
+            self.phase,
+            self.check_index,
+            len(self.checks),
+            left,
+            fraction,
+            None if self.check.is_timing else self.snap,
+        )
+
     def render(self, now: int) -> None:
-        if self.gamepad is not None and now - self.last_info >= INFO_REFRESH_NS:
+        if (
+            self.gamepad is not None
+            and self.state not in NO_DEVTREE
+            and now - self.last_info >= INFO_REFRESH_NS
+        ):
             self.refresh_info()
         if self.quit_asked_at is not None and now - self.quit_asked_at > QUIT_CONFIRM_NS:
             self.quit_asked_at = None
         s, state, info = self.surface, self.state, self.info
         if state == Screen.ONE_ONLY:
             screens.one_only(s)
+        elif state == Screen.PAUSED:
+            run = self.run_info.connection if self.run_info is not None else ""
+            screens.paused(s, self.pause_reason, self.label, run)
+        elif state == Screen.CHECK:
+            self.draw_check(now)
+        elif state == Screen.CHECK_END:
+            assert self.outcome is not None
+            left = max(0.0, (END_CARD_NS - (now - self.end_at)) / 1e9)
+            last = self.check_index == len(self.checks) - 1
+            screens.check_end(
+                s, self.check, self.outcome, self.check_index, len(self.checks), left, last
+            )
+        elif state == Screen.FOCUS_LOST:
+            screens.focus_lost(s, self.check, self.check_index, len(self.checks))
+        elif state == Screen.RESULTS:
+            screens.results(
+                s, self.label, self.run_dir, self.save_error, self.rig_result, self.results
+            )
         elif info is None or state == Screen.WAITING:
             screens.waiting(s, self.error)
         elif state == Screen.LABEL:
@@ -433,8 +711,7 @@ class App:
                 self.labels,
                 self.cursor,
                 self.preselected,
-                self.timing_result,
-                self.timing_note,
+                self.label_note,
             )
         elif state == Screen.NEW_LABEL:
             screens.new_label(s, self.typed, self.suggestion, self.label_error)
@@ -442,8 +719,6 @@ class App:
             screens.suite(s, self.label, self.suite, info.connection)
         elif state == Screen.SETUP:
             screens.setup(s, self.label, self.snap)
-        elif state == Screen.RESULTS:
-            screens.results(s, self.label, self.run_dir, self.save_error, self.rig_result)
         if self.quit_asked_at is not None:
             screens.quit_overlay(s)
         pygame.display.flip()

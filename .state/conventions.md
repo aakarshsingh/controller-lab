@@ -160,3 +160,7 @@
     Text goes through `KEYEVENTF_UNICODE`. An Alt tap before `SetForegroundWindow`
     lets the driver take focus.
   - `PrintWindow` with flag 3 captures the 960×600 client area.
+- Idle drift over XInput, Phase 3 on Black over USB: a resting controller sent no
+  state change at all in 30 s, so idle drift had 1 sample and read noise 0.00. Left
+  rested at 1.82% up and right at 2.25% up-left. Noise from state changes only shows
+  when the value moves, so a zero is a real reading, not a fault in the check.

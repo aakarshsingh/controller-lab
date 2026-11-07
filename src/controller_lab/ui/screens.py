@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pygame
 
-from controller_lab.analysis import TimingStats
+from controller_lab.checks.base import Check, Outcome, Phase
 from controller_lab.detect import ControllerInfo
 from controller_lab.rig import RigResult
 from controller_lab.source import Snapshot
@@ -26,6 +27,7 @@ PRIMARY_TOP = 500
 PRIMARY_PAD = (22, 12)
 HINT_POS = (MARGIN, 568)
 VIEW_ORIGIN = (MARGIN, 268)
+PROGRESS_RECT = pygame.Rect(MARGIN, 222, WIDTH - 2 * MARGIN, 26)
 LABEL_ROWS = 7
 WAITING_TEXT = "Connect a controller via USB or Bluetooth."
 ONE_ONLY_TEXT = "Connect only one controller."
@@ -42,6 +44,15 @@ SETUP_ITEMS = (
     "Rest the controller flat.",
 )
 LATENCY_LIMIT = "Measured from state changes Windows delivers, not true latency."
+STATUS_TEXT = {
+    "done": ("Done", GREEN),
+    "skipped": ("Skipped", GREY),
+    "voided": ("Voided", RED),
+    "not_tested": ("Not tested", GREY),
+    "interrupted": ("Interrupted", RED),
+}
+CHECK_HINTS = "B / S  skip    R  redo    Esc  quit"
+END_METRICS = 8
 
 _fonts: dict[int, pygame.font.Font] = {}
 
@@ -104,12 +115,11 @@ def label(
     labels: list[tuple[str, datetime]],
     cursor: int,
     preselected: str | None,
-    timing: tuple[TimingStats, int] | None,
     note: str,
 ) -> None:
     on_new = cursor >= len(labels)
     primary = "A  New label" if on_new else f"A  Use {labels[cursor][0]}"
-    _frame(s, 2, primary, "Up/Down  choose    T  report timing    Esc  quit")
+    _frame(s, 2, primary, "Up/Down  choose    Esc  quit")
 
     fields = (
         ("Name", info.name),
@@ -137,22 +147,8 @@ def label(
             text(s, when, (830, y + 2), 20, GREY)
     if preselected is not None:
         text(s, f"{preselected}: last used with this controller", (500, 330), 22, GREEN)
-
-    if timing is not None:
-        st, n_gaps = timing
-        rate = (
-            f"Timing  {st.rate_hz:.1f} Hz   mean {st.mean_ms:.2f} ms   "
-            f"jitter {st.jitter_ms:.2f} ms   p99 {st.p99_ms:.2f} ms"
-        )
-        gaps = (
-            f"gaps >30 ms {st.gaps_over_30ms}   max gap {st.max_gap_ms:.2f} ms   "
-            f"intervals {st.n}   tool gaps {n_gaps}   moving {st.moving_s:.1f} s   "
-            f"still intervals {st.still_count}"
-        )
-        for i, line in enumerate((rate, gaps, LATENCY_LIMIT)):
-            text(s, line, (MARGIN, 380 + i * 24), 20, GREY if i == 2 else WHITE)
     if note:
-        text(s, note, (MARGIN, 460), 24, RED)
+        text(s, note, (MARGIN, 400), 26, RED)
 
 
 def new_label(s: pygame.Surface, typed: str, suggestion: str, error: str) -> None:
@@ -206,6 +202,7 @@ def results(
     run_dir: Path | None,
     error: str,
     rig_result: RigResult | None,
+    checks: dict[str, dict[str, Any]],
 ) -> None:
     _frame(s, 6, "A  Test another controller", "N  test another controller    Esc  quit")
     if run_dir is None:
@@ -214,9 +211,11 @@ def results(
         text(s, f"Run saved for {label_name}.", (MARGIN, 76), 30)
         for i, line in enumerate(_wrap_path(str(run_dir), 22, WIDTH - 2 * MARGIN)[:3]):
             text(s, line, (MARGIN, 114 + i * 22), 22, GREY)
+        if error:
+            text(s, error, (MARGIN, 166), 22, RED)
     if rig_result is not None:
         r = rig_result
-        verdict = "ok" if r.ok else "too slow, timing checks would be skipped"
+        verdict = "ok" if r.ok else "too slow, timing checks are not tested"
         text(
             s,
             f"Rig  median {r.median_ms:.2f} ms   p99 {r.p99_ms:.2f} ms   "
@@ -225,7 +224,116 @@ def results(
             22,
             GREEN if r.ok else RED,
         )
-    text(s, "Scores and the verdict aren't built yet.", (MARGIN, 230), 24, GREY)
+    for i, entry in enumerate(checks.values()):
+        y = 230 + i * 30
+        status, colour = STATUS_TEXT.get(entry["status"], (entry["status"], GREY))
+        text(s, entry["title"], (MARGIN, y), 26)
+        text(s, status, (300, y), 26, colour)
+        if entry["message"] and entry["status"] != "skipped":
+            text(s, entry["message"], (460, y + 3), 22, GREY)
+    y = 230 + len(checks) * 30 + 14
+    text(s, "Scores and the verdict aren't built yet.", (MARGIN, y), 24, GREY)
+
+
+def _check_title(s: pygame.Surface, check: Check, index: int, total: int) -> None:
+    text(s, f"Check {index + 1} of {total} · {check.title}", (MARGIN, 72), 30, GREY)
+
+
+def check(
+    s: pygame.Surface,
+    check: Check,
+    phase: Phase,
+    index: int,
+    total: int,
+    seconds_left: float,
+    fraction: float,
+    snap: Snapshot | None,
+) -> None:
+    """A running check. For a timing check this is drawn once, and only the bar refreshes."""
+    _frame(s, 5, "", CHECK_HINTS)
+    _check_title(s, check, index, total)
+    text(s, phase.prompt, (MARGIN, 112), 36)
+    if check.is_timing:
+        if phase.duration_s is None:
+            note = f"Starts when the stick moves. Skipped after {phase.timeout_s:.0f} s."
+        else:
+            note = f"Measuring for {phase.duration_s:.0f} s. Only this bar refreshes."
+        text(s, note, (MARGIN, 165), 24, GREY)
+        text(s, LATENCY_LIMIT, (MARGIN, 262), 22, GREY)
+        panel(s, PROGRESS_RECT)
+        return
+    text(s, f"{seconds_left:.0f} s left", (MARGIN, 165), 26, GREY)
+    panel(s, PROGRESS_RECT)
+    done = PROGRESS_RECT.copy()
+    done.width = int(done.width * fraction)
+    if done.width:
+        panel(s, done, GREEN)
+    if snap is not None and phase.visual == "controller":
+        draw_controller(s, VIEW_ORIGIN, snap)
+
+
+def _metric_text(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return "n/a" if value is None else str(value)
+
+
+def check_end(
+    s: pygame.Surface,
+    check: Check,
+    outcome: Outcome,
+    index: int,
+    total: int,
+    seconds_left: float,
+    last: bool,
+) -> None:
+    voided = outcome.status == "voided"
+    if voided:
+        _frame(s, 5, "A  Redo", "B / S  skip    Esc  quit")
+    else:
+        _frame(s, 5, "A  Continue", "R  redo    Esc  quit")
+    _check_title(s, check, index, total)
+    status, colour = STATUS_TEXT.get(outcome.status, (outcome.status, GREY))
+    text(s, status, (MARGIN, 112), 40, colour)
+    if outcome.message:
+        text(s, outcome.message, (MARGIN, 160), 28, RED if voided else GREY)
+    items = [(k, v) for k, v in outcome.metrics.items() if not isinstance(v, dict | list)]
+    for i, (name, value) in enumerate(items[:END_METRICS]):
+        x, y = MARGIN + (i % 2) * 440, 210 + (i // 2) * 30
+        text(s, name.replace("_", " "), (x, y), 22, GREY)
+        text(s, _metric_text(value), (x + 230, y), 22)
+    if not voided:
+        after = "Results" if last else "Next check"
+        text(s, f"{after} in {seconds_left:.0f} s", (MARGIN, 450), 24, GREY)
+
+
+def focus_lost(s: pygame.Surface, check: Check, index: int, total: int) -> None:
+    _frame(s, 5, "A  Redo", "B / S  skip    Esc  quit")
+    _check_title(s, check, index, total)
+    text(s, "Focus was lost, A to redo", (MARGIN, 112), 36, RED)
+    text(s, "Another window came to the front, so this check was voided.", (MARGIN, 160), 24)
+    text(s, "Click this window or press A on the controller.", (MARGIN, 192), 24, GREY)
+
+
+def paused(s: pygame.Surface, reason: str, label_name: str, run_connection: str) -> None:
+    if reason == "confirm":
+        _frame(s, 5, "A  Yes, continue", "B  pick another label    Esc  quit")
+        text(s, f"Is this still {label_name}?", (MARGIN, 200), 40)
+        text(s, "The interrupted check starts again.", (MARGIN, 250), 24, GREY)
+        return
+    _frame(s, 5, "", "Esc  quit")
+    text(s, "Paused", (MARGIN, 72), 30, GREY)
+    if reason == "one_only":
+        lines = (ONE_ONLY_TEXT, "Disconnect the others to continue.")
+    elif reason == "other_connection" and run_connection == "usb":
+        lines = ("Reconnected over Bluetooth.", "Plug the USB cable back in to continue.")
+    elif reason == "other_connection":
+        lines = ("Reconnected over USB.", "Unplug the USB cable to continue over Bluetooth.")
+    else:
+        lines = ("The controller disconnected.", "Reconnect it to continue.")
+    text(s, lines[0], (MARGIN, 200), 36)
+    text(s, lines[1], (MARGIN, 250), 28, GREY)
+    text(s, "A run never mixes connections.", (MARGIN, 300), 22, GREY)
 
 
 def quit_overlay(s: pygame.Surface) -> None:
@@ -235,12 +343,3 @@ def quit_overlay(s: pygame.Surface) -> None:
     panel(s, box, PANEL)
     text(s, QUIT_TEXT, (box.x + 30, box.y + 28), 36)
     text(s, "Any other key keeps going.", (box.x + 30, box.y + 72), 22, GREY)
-
-
-def timing_prompt(s: pygame.Surface, progress: pygame.Rect) -> None:
-    _frame(s, 2, "", "Esc  cancel")
-    text(s, "Report timing", (MARGIN, 76), 30)
-    text(s, "Push the left stick past half way to start,", (MARGIN, 120), 30)
-    text(s, "then spin it continuously for 15 s.", (MARGIN, 155), 30)
-    text(s, "Only this bar refreshes while measuring.", (MARGIN, 195), 22, GREY)
-    panel(s, progress)

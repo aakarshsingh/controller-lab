@@ -135,3 +135,55 @@ def loop_stats(durations_ns: np.ndarray) -> LoopStats:
     if ms.size == 0:
         return LoopStats(float("nan"), float("nan"))
     return LoopStats(float(np.median(ms)), float(np.percentile(ms, 99)))
+
+
+# ---- idle drift ------------------------------------------------------------
+
+DIRECTIONS = ("right", "up-right", "up", "up-left", "left", "down-left", "down", "down-right")
+
+
+def _weighted(values: np.ndarray, weights: np.ndarray | None) -> np.ndarray:
+    v = np.asarray(values, dtype=np.float64)
+    if weights is None:
+        return np.ones_like(v)
+    return np.asarray(weights, dtype=np.float64)
+
+
+def stick_offset(
+    xs: np.ndarray, ys: np.ndarray, weights: np.ndarray | None = None
+) -> tuple[float, str]:
+    """Mean resting offset as % of the full radius, and its direction.
+
+    `weights` is how long each sample was held, so a value held for seconds counts
+    for more than a brief flicker. SDL's y axis grows downwards.
+    """
+    x, y = np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
+    w = _weighted(x, weights)
+    mx, my = float(np.average(x, weights=w)), float(np.average(y, weights=w))
+    pct = float(np.hypot(mx, my)) / AXIS_MAX * 100
+    sector = int(np.round(np.degrees(np.arctan2(-my, mx)) / 45)) % 8
+    return pct, DIRECTIONS[sector]
+
+
+def noise_std(xs: np.ndarray, ys: np.ndarray, weights: np.ndarray | None = None) -> float:
+    """Spread of the stick around its mean position, as % of the full radius."""
+    x, y = np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
+    w = _weighted(x, weights)
+    var_x = np.average((x - np.average(x, weights=w)) ** 2, weights=w)
+    var_y = np.average((y - np.average(y, weights=w)) ** 2, weights=w)
+    return float(np.sqrt(var_x + var_y)) / AXIS_MAX * 100
+
+
+def max_deviation(xs: np.ndarray, ys: np.ndarray) -> float:
+    """The furthest the stick got from the centre, as % of the full radius."""
+    r = np.hypot(np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64))
+    return float(r.max()) / AXIS_MAX * 100 if r.size else 0.0
+
+
+def button_presses(masks: np.ndarray) -> int:
+    """Presses in a run of button bitmasks: bits set at the start, plus rising edges."""
+    m = np.asarray(masks, dtype=np.int64)
+    if m.size == 0:
+        return 0
+    rising = np.concatenate(([m[0]], m[1:] & ~m[:-1]))
+    return sum(int(v).bit_count() for v in rising)

@@ -1,6 +1,14 @@
 import numpy as np
 
-from controller_lab.analysis import intervals, motion_start, spin_timing, timing_stats
+from controller_lab.analysis import (
+    button_presses,
+    intervals,
+    motion_start,
+    noise_std,
+    spin_timing,
+    stick_offset,
+    timing_stats,
+)
 
 MS = 1_000_000
 
@@ -102,3 +110,33 @@ def test_return_to_centre_is_left_out():
     stats = spin_timing(t, x, y, NO_GAPS, WINDOW_NS)
     assert stats.gaps_over_30ms == 0
     assert stats.still_count == 1
+
+
+# ---- idle drift ----------------------------------------------------------
+
+
+def test_stick_resting_up_left_reads_its_offset_and_direction():
+    rng = np.random.default_rng(1)
+    c = 0.05 * 32767 / np.sqrt(2)  # 5% of the radius, up and to the left
+    x = -c + rng.normal(0, 30, 500)
+    y = -c + rng.normal(0, 30, 500)  # SDL's y grows downwards
+    pct, direction = stick_offset(x, y)
+    assert abs(pct - 5.0) < 0.2
+    assert direction == "up-left"
+
+
+def test_stick_offset_is_weighted_by_time_held():
+    x = np.array([0.0, 3276.7])  # 10% right, held 9 times longer
+    pct, direction = stick_offset(x, np.zeros(2), weights=np.array([1.0, 9.0]))
+    assert abs(pct - 9.0) < 1e-9
+    assert direction == "right"
+
+
+def test_noise_std_of_a_known_array():
+    x = np.array([-327.67, 327.67] * 50)  # ±1% around the centre
+    assert abs(noise_std(x, np.zeros_like(x)) - 1.0) < 1e-9
+
+
+def test_button_presses_count_rising_edges():
+    masks = np.array([0, 0b1, 0b1, 0, 0b11, 0b10])
+    assert button_presses(masks) == 3
