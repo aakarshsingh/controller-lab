@@ -1,22 +1,30 @@
-"""Phase 1 spike: detection, live raw values, rig check and report timing."""
+"""Main loop and screen state machine.
+
+The report timing spike stays behind `T` on the Label screen until the check
+framework replaces it.
+"""
 
 from __future__ import annotations
 
 import math
 import time
+from dataclasses import asdict
 from datetime import UTC, datetime
+from enum import StrEnum
+from pathlib import Path
 
 import pygame
 from pygame._sdl2 import controller
 
-from controller_lab import analysis, devtree, rig
+from controller_lab import analysis, devtree, history, rig
 from controller_lab.analysis import TimingStats
 from controller_lab.detect import ControllerInfo, controller_info
 from controller_lab.devtree import DeviceInfo
 from controller_lab.rig import RigResult
 from controller_lab.sampler import Recorder
-from controller_lab.source import AXIS_NAMES, BUTTON_NAMES, Gamepad, Snapshot
-from controller_lab.ui.draw import BG, GREEN, GREY, RED, WHITE, panel, text
+from controller_lab.source import Gamepad, Snapshot
+from controller_lab.ui import screens
+from controller_lab.ui.draw import GREEN, panel
 
 WINDOW = (960, 600)
 FRAME_NS = 1_000_000_000 // 60
@@ -27,23 +35,73 @@ MIN_MOVING_S = 10.0
 PROGRESS_NS = 250_000_000
 PROGRESS_RECT = pygame.Rect(40, 300, 880, 30)
 MOTION_LIMIT = analysis.MOTION_RADIUS * analysis.AXIS_MAX
-WAITING_TEXT = "Connect a controller via USB or Bluetooth."
-ONE_ONLY_TEXT = "Connect only one controller."
+QUIT_CONFIRM_NS = 3 * 1_000_000_000
+SUITES = ("full", "connection")
+
+
+class Screen(StrEnum):
+    WAITING = "waiting"
+    ONE_ONLY = "one_only"
+    LABEL = "label"
+    NEW_LABEL = "new_label"
+    SUITE = "suite"
+    SETUP = "setup"
+    RIG = "rig"
+    RESULTS = "results"
+
+
+# B and Backspace go back one screen before the checks start.
+BACK = {Screen.SUITE: Screen.LABEL, Screen.SETUP: Screen.SUITE}
+
+KEY_ACTIONS = {
+    pygame.K_SPACE: "continue",
+    pygame.K_RETURN: "continue",
+    pygame.K_KP_ENTER: "continue",
+    pygame.K_UP: "up",
+    pygame.K_DOWN: "down",
+    pygame.K_BACKSPACE: "back",
+    pygame.K_s: "skip",
+    pygame.K_r: "redo",
+    pygame.K_n: "next",
+    pygame.K_t: "timing",
+}
+BUTTON_ACTIONS = {
+    pygame.CONTROLLER_BUTTON_A: "continue",
+    pygame.CONTROLLER_BUTTON_B: "back",
+    pygame.CONTROLLER_BUTTON_DPAD_UP: "up",
+    pygame.CONTROLLER_BUTTON_DPAD_DOWN: "down",
+}
+# A press made during the rig check must not act on the screen that follows it.
+PRESS_EVENTS = (pygame.KEYDOWN, pygame.CONTROLLERBUTTONDOWN, pygame.TEXTINPUT)
 
 
 class App:
-    def __init__(self, screen: pygame.Surface) -> None:
-        self.screen = screen
+    def __init__(self, surface: pygame.Surface) -> None:
+        self.surface = surface
         self.running = True
+        self.state = Screen.WAITING
         self.pending: list[pygame.event.Event] = []
         self.gamepad: Gamepad | None = None
         self.info: ControllerInfo | None = None
         self.devtree_ms = 0.0
         self.connected_at = datetime.now(UTC)
-        self.too_many = False
         self.snap: Snapshot | None = None
         self.error = ""
+        self.quit_asked_at: int | None = None
+        # Label, New label and Suite
+        self.labels: list[tuple[str, datetime]] = []
+        self.preselected: str | None = None
+        self.cursor = 0
+        self.suite = SUITES[0]
+        self.label = ""
+        self.typed = ""
+        self.suggestion = ""
+        self.label_error = ""
+        # Rig and the saved run
         self.rig_result: RigResult | None = None
+        self.run_dir: Path | None = None
+        self.save_error = ""
+        # Report timing spike
         self.timing_result: tuple[TimingStats, int] | None = None
         self.timing_note = ""
         self.recorder: Recorder | None = None
@@ -52,6 +110,7 @@ class App:
         self.last_frame = 0
         self.last_progress = 0
         self.last_info = 0
+        pygame.key.stop_text_input()
 
     # ---- main loop -------------------------------------------------------
 
@@ -66,6 +125,11 @@ class App:
             events, self.pending = self.pending + pygame.event.get(), []
             for event in events:
                 self.handle(event)
+
+            if self.state == Screen.RIG:
+                self.run_rig()
+                prev = time.perf_counter_ns()
+                continue
 
             if self.gamepad is not None:
                 t = time.perf_counter_ns()
@@ -89,16 +153,31 @@ class App:
         except pygame.error:
             return None
 
+    def go(self, state: Screen) -> None:
+        if state == Screen.NEW_LABEL:
+            pygame.key.start_text_input()
+        elif self.state == Screen.NEW_LABEL:
+            pygame.key.stop_text_input()
+        self.state = state
+        self.last_frame = 0
+
     # ---- events ----------------------------------------------------------
 
     def handle(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                self.running = False
-            elif event.key == pygame.K_t and self.gamepad is not None and self.recorder is None:
-                self.start_timing()
+            self.handle_key(event.key)
+        elif event.type == pygame.TEXTINPUT:
+            if self.state == Screen.NEW_LABEL:
+                self.typed = (self.typed + event.text)[: history.MAX_LABEL]
+                self.label_error = ""
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            self.quit_asked_at = None
+        elif event.type == pygame.CONTROLLERBUTTONDOWN:
+            ours = self.gamepad is not None and event.instance_id == self.gamepad.instance_id
+            if ours and not self.close_quit_confirm() and event.button in BUTTON_ACTIONS:
+                self.act(BUTTON_ACTIONS[event.button])
         elif event.type == pygame.CONTROLLERDEVICEADDED:
             if controller.get_count() > 1:
                 self.block_extra()
@@ -107,15 +186,111 @@ class App:
         elif event.type == pygame.CONTROLLERDEVICEREMOVED:
             if self.gamepad is not None and event.instance_id == self.gamepad.instance_id:
                 self.disconnect()
-            elif self.too_many and controller.get_count() <= 1:
-                self.too_many = False
+                self.go(Screen.WAITING)
+            elif self.state == Screen.ONE_ONLY and controller.get_count() <= 1:
+                self.go(Screen.WAITING)
                 if controller.get_count() == 1:
                     self.connect(0)
+
+    def handle_key(self, key: int) -> None:
+        if self.recorder is not None:
+            if key == pygame.K_ESCAPE:
+                self.cancel_timing()
+        elif self.state == Screen.NEW_LABEL:
+            self.edit_label(key)
+        elif key == pygame.K_ESCAPE:
+            self.ask_quit()
+        elif not self.close_quit_confirm() and key in KEY_ACTIONS:
+            self.act(KEY_ACTIONS[key])
+
+    def ask_quit(self) -> None:
+        """A first `Esc` asks, and a second one within 3 s quits."""
+        now = time.perf_counter_ns()
+        if self.quit_asked_at is not None and now - self.quit_asked_at <= QUIT_CONFIRM_NS:
+            self.running = False
+        else:
+            self.quit_asked_at = now
+        self.last_frame = 0
+
+    def close_quit_confirm(self) -> bool:
+        """Close the quit overlay. Return True when it was open, so the input is used up."""
+        was_open = self.quit_asked_at is not None
+        self.quit_asked_at = None
+        if was_open:
+            self.last_frame = 0
+        return was_open
+
+    def act(self, action: str) -> None:
+        if self.recorder is not None:
+            return
+        state = self.state
+        if action == "back" and state in BACK:
+            self.go(BACK[state])
+        elif state == Screen.LABEL:
+            self.act_label(action)
+        elif state == Screen.NEW_LABEL:
+            if action == "continue":
+                self.accept_label()
+            elif action == "back":
+                self.go(Screen.LABEL)
+        elif state == Screen.SUITE:
+            if action in ("up", "down"):
+                step = 1 if action == "down" else -1
+                self.suite = SUITES[max(0, min(len(SUITES) - 1, SUITES.index(self.suite) + step))]
+            elif action == "continue":
+                self.go(Screen.SETUP)
+        elif state == Screen.SETUP and action == "continue":
+            self.go(Screen.RIG)
+        elif state == Screen.RESULTS and action in ("continue", "next"):
+            self.test_another()
+
+    def act_label(self, action: str) -> None:
+        new_row = len(self.labels)
+        if action == "up":
+            self.cursor = max(0, self.cursor - 1)
+        elif action == "down":
+            self.cursor = min(new_row, self.cursor + 1)
+        elif action == "timing" and self.gamepad is not None:
+            self.start_timing()
+        elif action == "continue":
+            if self.cursor == new_row:
+                self.suggestion = history.next_default_label()
+                self.typed = self.label_error = ""
+                self.go(Screen.NEW_LABEL)
+            else:
+                self.choose_label(self.labels[self.cursor][0])
+
+    def edit_label(self, key: int) -> None:
+        if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self.accept_label()
+        elif key == pygame.K_BACKSPACE:
+            self.typed = self.typed[:-1]
+            self.label_error = ""
+        elif key == pygame.K_ESCAPE:
+            self.go(Screen.LABEL)
+
+    def accept_label(self) -> None:
+        label = self.typed.strip() or self.suggestion
+        # Windows folders ignore case, so reuse the saved spelling of a label.
+        for saved, _ in self.labels:
+            if saved.lower() == label.lower():
+                label = saved
+        error = history.validate_label(label)
+        if error is not None:
+            self.label_error = error
+            return
+        self.choose_label(label)
+
+    def choose_label(self, label: str) -> None:
+        self.label = label
+        connection = self.info.connection if self.info is not None else "usb"
+        self.suite = "full" if connection == "usb" else "connection"
+        self.go(Screen.SUITE)
 
     def block_extra(self) -> None:
         """More than one controller is attached: test nothing until one is left."""
         self.disconnect()
-        self.too_many = True
+        self.go(Screen.ONE_ONLY)
 
     def read_devices(self) -> list[DeviceInfo]:
         t0 = time.perf_counter_ns()
@@ -137,15 +312,15 @@ class App:
         self.error = ""
         self.connected_at = datetime.now(UTC)
         self.refresh_info()
-        self.rig_result = None
-        self.timing_result = None
+        assert self.info is not None
+        self.labels = history.list_labels()
+        self.preselected = history.label_for_device(self.info.device_key)
+        names = [name for name, _ in self.labels]
+        self.cursor = names.index(self.preselected) if self.preselected in names else len(names)
+        self.suite = SUITES[0]
+        self.rig_result = self.timing_result = None
         self.timing_note = ""
-        self.render_message("Rig check running for 5 s. Leave the controller alone.")
-        self.rig_result = rig.run_rig(self.rig_pass)
-
-    def rig_pass(self) -> None:
-        self.pending.extend(pygame.event.get())
-        self.read()
+        self.go(Screen.LABEL)
 
     def disconnect(self) -> None:
         if self.gamepad is not None:
@@ -155,20 +330,58 @@ class App:
         self.rig_result = self.timing_result = None
         self.timing_note = ""
 
-    # ---- report timing ---------------------------------------------------
+    def test_another(self) -> None:
+        self.disconnect()
+        self.go(Screen.WAITING)
+        count = controller.get_count()
+        if count > 1:
+            self.go(Screen.ONE_ONLY)
+        elif count == 1:
+            self.connect(0)
+
+    # ---- rig and run -----------------------------------------------------
+
+    def run_rig(self) -> None:
+        screens.rig(self.surface)
+        pygame.display.flip()
+        self.rig_result = rig.run_rig(self.rig_pass)
+        self.pending = [e for e in self.pending if e.type not in PRESS_EVENTS]
+        self.save_run()
+
+    def rig_pass(self) -> None:
+        self.pending.extend(pygame.event.get())
+        self.read()
+
+    def save_run(self) -> None:
+        """Save an empty run. Checks fill it in once they exist."""
+        self.refresh_info()
+        if self.info is None:
+            self.go(Screen.WAITING)
+            return
+        try:
+            self.run_dir = history.new_run_dir(self.label, self.info.connection)
+            history.save_metrics(self.run_dir, {"label": self.label, **asdict(self.info)})
+            self.save_error = ""
+        except (OSError, ValueError) as exc:
+            self.run_dir = None
+            self.save_error = f"Could not save the run: {exc}"
+        self.go(Screen.RESULTS)
+
+    # ---- report timing spike ---------------------------------------------
 
     def start_timing(self) -> None:
         self.recorder = Recorder(timing=True)
         self.timing_start = self.last_progress = time.perf_counter_ns()
         self.motion_ns = None
         self.timing_note = ""
-        self.screen.fill(BG)
-        text(self.screen, "Report timing", (40, 40), 40)
-        text(self.screen, "Push the left stick past half way to start,", (40, 100), 30)
-        text(self.screen, "then spin it continuously for 15 s.", (40, 135), 30)
-        text(self.screen, "Only this bar refreshes while measuring.", (40, 175), 22, GREY)
-        panel(self.screen, PROGRESS_RECT)
+        screens.timing_prompt(self.surface, PROGRESS_RECT)
         pygame.display.flip()
+
+    def cancel_timing(self) -> None:
+        """`Esc` during the spike drops the measurement and returns to Label."""
+        self.recorder = None
+        self.timing_note = ""
+        self.last_frame = 0
 
     def tick_timing(self, now: int) -> None:
         if self.motion_ns is None:
@@ -186,7 +399,7 @@ class App:
             self.last_progress = now
             done = PROGRESS_RECT.copy()
             done.width = int(PROGRESS_RECT.width * elapsed / TIMING_NS)
-            panel(self.screen, done, GREEN)
+            panel(self.surface, done, GREEN)
             pygame.display.update(PROGRESS_RECT)
 
     def finish_timing(self) -> None:
@@ -202,107 +415,46 @@ class App:
 
     # ---- drawing ---------------------------------------------------------
 
-    def render_message(self, message: str) -> None:
-        self.render(time.perf_counter_ns())
-        panel(self.screen, (40, 520, 880, 50))
-        text(self.screen, message, (55, 535), 26)
-        pygame.display.flip()
-
     def render(self, now: int) -> None:
-        s = self.screen
-        s.fill(BG)
-        text(s, "Controller Lab", (40, 30), 40)
-        if self.gamepad is None or self.info is None:
-            text(s, ONE_ONLY_TEXT if self.too_many else WAITING_TEXT, (40, 260), 36)
-            if self.error:
-                text(s, self.error, (40, 320), 24, RED)
-            text(s, "Esc  quit", (40, 560), 22, GREY)
-            pygame.display.flip()
-            return
-
-        if now - self.last_info >= INFO_REFRESH_NS:
+        if self.gamepad is not None and now - self.last_info >= INFO_REFRESH_NS:
             self.refresh_info()
-        info = self.info
-        fields = [
-            ("Name", info.name),
-            ("Type", info.type),
-            ("Connection", info.connection),
-            ("Battery", info.battery),
-            ("Ids", info.vendor_product),
-            ("Device key", info.device_key or "none"),
-            ("Source", f"{info.identity_source}   read {self.devtree_ms:.2f} ms"),
-            ("Backend", info.backend),
-            ("GUID", info.guid),
-        ]
-        for i, (label, value) in enumerate(fields):
-            text(s, label, (40, 80 + i * 25), 22, GREY)
-            text(s, value, (170, 80 + i * 25), 22)
-
-        if self.snap is not None:
-            for i, name in enumerate(AXIS_NAMES):
-                text(s, name, (620, 80 + i * 25), 22, GREY)
-                text(s, f"{self.snap[i]:>7}", (670, 80 + i * 25), 22)
-            mask = self.snap[6]
-            for i, name in enumerate(BUTTON_NAMES):
-                pressed = bool(mask >> i & 1)
-                x, y = 40 + (i % 7) * 125, 315 + (i // 7) * 34
-                panel(s, (x, y, 115, 28), GREEN if pressed else (34, 37, 43))
-                text(s, name, (x + 10, y + 5), 22, BG if pressed else WHITE)
-
-        y = 395
-        if self.rig_result is not None:
-            r = self.rig_result
-            colour = GREEN if r.ok else RED
-            text(
+        if self.quit_asked_at is not None and now - self.quit_asked_at > QUIT_CONFIRM_NS:
+            self.quit_asked_at = None
+        s, state, info = self.surface, self.state, self.info
+        if state == Screen.ONE_ONLY:
+            screens.one_only(s)
+        elif info is None or state == Screen.WAITING:
+            screens.waiting(s, self.error)
+        elif state == Screen.LABEL:
+            screens.label(
                 s,
-                f"Rig  median {r.median_ms:.3f} ms   p99 {r.p99_ms:.3f} ms   "
-                f"sleep {r.sleep_ms:.3f} ms   slow passes {r.slow_passes}   "
-                f"ok {r.ok}   spin-wait {rig.SPIN_WAIT}",
-                (40, y),
-                22,
-                colour,
+                info,
+                self.devtree_ms,
+                self.labels,
+                self.cursor,
+                self.preselected,
+                self.timing_result,
+                self.timing_note,
             )
-        if self.timing_result is not None:
-            st, n_gaps = self.timing_result
-            text(
-                s,
-                f"Timing  {st.rate_hz:.1f} Hz   mean {st.mean_ms:.2f} ms   "
-                f"jitter {st.jitter_ms:.2f} ms   p99 {st.p99_ms:.2f} ms",
-                (40, y + 28),
-                22,
-            )
-            text(
-                s,
-                f"        gaps >30 ms {st.gaps_over_30ms}   max gap {st.max_gap_ms:.2f} ms   "
-                f"intervals {st.n}   tool gaps {n_gaps}",
-                (40, y + 52),
-                22,
-            )
-            text(
-                s,
-                f"        moving {st.moving_s:.1f} s   still intervals {st.still_count}",
-                (40, y + 76),
-                22,
-            )
-            text(
-                s,
-                "Measured from state changes Windows delivers, not true latency.",
-                (40, y + 102),
-                20,
-                GREY,
-            )
-        if self.timing_note:
-            text(s, self.timing_note, (40, 525), 24, RED)
-        text(s, "T  report timing (15 s)     Esc  quit", (40, 560), 22, GREY)
+        elif state == Screen.NEW_LABEL:
+            screens.new_label(s, self.typed, self.suggestion, self.label_error)
+        elif state == Screen.SUITE:
+            screens.suite(s, self.label, self.suite, info.connection)
+        elif state == Screen.SETUP:
+            screens.setup(s, self.label, self.snap)
+        elif state == Screen.RESULTS:
+            screens.results(s, self.label, self.run_dir, self.save_error, self.rig_result)
+        if self.quit_asked_at is not None:
+            screens.quit_overlay(s)
         pygame.display.flip()
 
 
 def run() -> None:
     pygame.init()
     controller.init()
-    screen = pygame.display.set_mode(WINDOW)
+    surface = pygame.display.set_mode(WINDOW)
     pygame.display.set_caption("Controller Lab")
     try:
-        App(screen).loop()
+        App(surface).loop()
     finally:
         pygame.quit()

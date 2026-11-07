@@ -69,7 +69,9 @@
   - `uv run pytest` runs the tests.
   - `uv run ruff check .` and `uv run ruff format .` lint and format.
 - Testing is lean. Pytest covers only `analysis.py` and `scoring.py`, using
-  synthetic arrays. The hardware path is checked by hand each phase with a real controller.
+  synthetic arrays. The hardware path is checked unattended each phase with one wired
+  controller, through scratch scripts that send keystrokes and capture the window with a
+  scratch `USERPROFILE`. Checks that need hands run together in Phase 8.
   There is no FakeSource, test hints or headless app smoke test unless scope asks for them.
 - CI is one GitHub Actions job on `windows-latest` that runs ruff and pytest.
 - Distribution is `pipx install controller-lab`, plus a later PyInstaller exe
@@ -149,3 +151,12 @@
 - The wheel `include` list in `pyproject.toml` names `**/*.py` and
   `profiles/*.toml`. Any other data file inside the package must be added there,
   or it won't ship.
+- Driving the app unattended, learned in Phase 2:
+  - `.venv\Scripts\python.exe` is a redirector that starts the real interpreter as a
+    child, so the window's process isn't the one launched. Kill the tree.
+  - Find the window by title `Controller Lab` and class `pygame`. The Windows Terminal
+    tab can carry the same title.
+  - `SendInput` keys need a real scan code from `MapVirtualKeyW`, or SDL ignores them.
+    Text goes through `KEYEVENTF_UNICODE`. An Alt tap before `SetForegroundWindow`
+    lets the driver take focus.
+  - `PrintWindow` with flag 3 captures the 960×600 client area.
