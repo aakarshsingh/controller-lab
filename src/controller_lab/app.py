@@ -263,7 +263,10 @@ class App:
         elif event.type == pygame.CONTROLLERBUTTONDOWN:
             ours = self.gamepad is not None and event.instance_id == self.gamepad.instance_id
             if ours and not self.close_quit_confirm() and event.button in BUTTON_ACTIONS:
-                self.act(BUTTON_ACTIONS[event.button])
+                # At a gate, A counts only when A is the gate, and gate_passed() reads that.
+                at_gate = self.gate_pending and self.state in (Screen.START, Screen.CHECK)
+                if not (at_gate and event.button == pygame.CONTROLLER_BUTTON_A):
+                    self.act(BUTTON_ACTIONS[event.button])
         elif event.type == pygame.CONTROLLERDEVICEADDED:
             self.on_added(event.device_index)
         elif event.type == pygame.CONTROLLERDEVICEREMOVED:
