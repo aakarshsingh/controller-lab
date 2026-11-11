@@ -170,8 +170,12 @@ def gate_prompt(gate: str) -> str:
     """What the start screen asks for, such as "Press RT to start"."""
     parts = gate.split("+")
     verb = "Push" if all(p in ("LS", "RS") for p in parts) else "Press"
-    short = " + ".join(SHORT_NAMES.get(p, p) for p in parts)
-    return f"{verb} {short} to start"
+    return f"{verb} {gate_short(gate)} to start"
+
+
+def gate_short(gate: str) -> str:
+    """The gate's inputs by their short names, such as "LB + RB" or "the left stick"."""
+    return " + ".join(SHORT_NAMES.get(p, p) for p in gate.split("+"))
 
 
 def _part_pressed(part: str, snap: Snapshot) -> bool:

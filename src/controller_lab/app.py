@@ -44,6 +44,8 @@ QUIT_CONFIRM_NS = 3 * 1_000_000_000
 END_CARD_NS = 5 * 1_000_000_000
 # After a gate input is pressed, wait for every input to rest, but never longer than this.
 REST_WAIT_NS = 3 * 1_000_000_000
+# A gate that has seen no input for this long shows how to skip or start without it.
+GATE_HINT_NS = 10 * 1_000_000_000
 # The left stick steps a list selection once past NAV_ON, and re-arms under NAV_OFF.
 NAV_ON = 0.5 * 32767
 NAV_OFF = 0.25 * 32767
@@ -90,11 +92,13 @@ KEY_ACTIONS = {
     pygame.K_n: "next",
     pygame.K_c: "compare",
     pygame.K_y: "details",
+    pygame.K_o: "open",
 }
 BUTTON_ACTIONS = {
     pygame.CONTROLLER_BUTTON_A: "continue",
     pygame.CONTROLLER_BUTTON_B: "b",
     pygame.CONTROLLER_BUTTON_Y: "details",
+    pygame.CONTROLLER_BUTTON_X: "open",
     pygame.CONTROLLER_BUTTON_BACK: "previous",  # View
     pygame.CONTROLLER_BUTTON_DPAD_UP: "up",
     pygame.CONTROLLER_BUTTON_DPAD_DOWN: "down",
@@ -160,7 +164,8 @@ class App:
         self.gate_pending = False
         self.gate_seen_up = False
         self.gate_armed_at: int | None = None
-        self.drawn_key: tuple[int, int, bool] | None = None
+        self.gate_since = 0
+        self.drawn_key: tuple[int, int, bool, bool] | None = None
         self.nav_armed = False
         # The Results details page: its page, or None while it's closed.
         self.details_page: int | None = None
@@ -321,6 +326,8 @@ class App:
                 self.go(Screen.SETUP)
         elif state == Screen.SETUP and action == "continue":
             self.go(Screen.RIG)
+        elif state == Screen.RESULTS and action == "open":
+            self.open_report()
         elif state == Screen.RESULTS and self.details_page is not None:
             if action in ("up", "down"):
                 step = 1 if action == "down" else -1
@@ -456,6 +463,9 @@ class App:
                 self.reconnect(device_index)
         elif controller.get_count() > 1:
             self.block_extra()
+        elif self.gamepad is None and self.state == Screen.RESULTS:
+            # Results stay up until the user moves on. Open the controller so its A works.
+            self.open_gamepad(device_index)
         elif self.gamepad is None:
             self.connect(device_index)
 
@@ -471,6 +481,10 @@ class App:
                 elif count == 0:
                     self.pause_reason = "removed"
                     self.last_frame = 0
+        elif ours and self.state == Screen.RESULTS:
+            # Turning the controller off after a run keeps its Results on screen.
+            self.disconnect()
+            self.last_frame = 0
         elif ours:
             self.disconnect()
             self.go(Screen.WAITING)
@@ -660,6 +674,12 @@ class App:
         self.gate_pending = gate is not None
         self.gate_seen_up = False
         self.gate_armed_at = None
+        self.gate_since = time.perf_counter_ns()
+
+    def gate_waited(self, now: int) -> bool:
+        """True once a pending gate has gone 10 s with no press of its input."""
+        waiting = self.gate_pending and self.gate_armed_at is None
+        return waiting and now - self.gate_since >= GATE_HINT_NS
 
     def arm_gate(self) -> None:
         """`Space` or `Enter` stands in for the gate input."""
@@ -775,8 +795,9 @@ class App:
         self.go(Screen.CHECK_END)
 
     def tick_end_card(self, now: int) -> None:
-        voided = self.outcome is not None and self.outcome.status == "voided"
-        if not voided and now - self.end_at >= END_CARD_NS:
+        outcome = self.outcome
+        stays = outcome is None or outcome.status == "voided" or screens.end_card_waits(outcome)
+        if not stays and now - self.end_at >= END_CARD_NS:
             self.advance()
 
     def advance(self) -> None:
@@ -815,6 +836,17 @@ class App:
             webbrowser.open(path.as_uri())
         except REPORT_ERRORS as exc:  # show it on Results rather than crash
             self.save_error = f"Could not write the comparison: {exc}"
+        self.last_frame = 0
+
+    def open_report(self) -> None:
+        """Open this run's report.html in the browser."""
+        if self.run_dir is None:
+            return
+        path = self.run_dir / report.REPORT_FILE
+        if path.is_file():
+            webbrowser.open(path.as_uri())
+        else:
+            self.save_error = "This run has no report to open."
         self.last_frame = 0
 
     def record(self, outcome: Outcome) -> None:
@@ -877,7 +909,7 @@ class App:
         if self.quit_asked_at is not None and now - self.quit_asked_at > QUIT_CONFIRM_NS:
             self.quit_asked_at = None
             self.last_frame = 0
-        key = (self.check_index, self.phase_index, self.gate_pending)
+        key = (self.check_index, self.phase_index, self.gate_pending, self.gate_waited(now))
         if self.last_frame == 0 or key != self.drawn_key:
             # Redraw in full whenever the phase or its gate changes, so every prompt shows.
             self.drawn_key = key
@@ -912,6 +944,7 @@ class App:
             max(0, now - self.counting_from) / 1e9,
             None if self.check.is_timing else self.snap,
             uses_b(self.phase, self.gate),
+            self.gate_waited(now),
         )
 
     def render(self, now: int) -> None:
@@ -930,7 +963,15 @@ class App:
             run = self.run_info.connection if self.run_info is not None else ""
             screens.paused(s, self.pause_reason, self.label, run)
         elif state == Screen.START:
-            screens.start(s, self.check, self.check_index, len(self.checks), self.gate, self.snap)
+            screens.start(
+                s,
+                self.check,
+                self.check_index,
+                len(self.checks),
+                self.gate,
+                self.snap,
+                self.gate_waited(now),
+            )
         elif state == Screen.CHECK:
             self.draw_check(now)
         elif state == Screen.CHECK_END:

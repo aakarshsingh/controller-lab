@@ -14,7 +14,14 @@ from typing import Any
 import pygame
 
 from controller_lab.analysis import DIRECTIONS
-from controller_lab.checks.base import Check, Outcome, Phase, gate_name, gate_prompt
+from controller_lab.checks.base import (
+    Check,
+    Outcome,
+    Phase,
+    gate_name,
+    gate_prompt,
+    gate_short,
+)
 from controller_lab.detect import ControllerInfo
 from controller_lab.rig import RigResult
 from controller_lab.scoring import HONEST_LIMITS, RunScore
@@ -62,10 +69,12 @@ START_HINTS = "B / S  skip    Space  start    Esc  quit"
 START_HINTS_PREVIOUS = "B / S  skip    View / Backspace  redo the last check    Esc  quit"
 END_METRICS = 8
 END_LINES = 10
+# An end card with more lines than this waits for A, so there's time to read it.
+END_AUTO_LINES = 4
 ISSUES_BOTTOM = 432
 NOTES_BOTTOM = 425
 SKIPPED_NAMED = 4
-RESULT_HINTS = "Y  details    N  test another controller    C  compare    Esc  quit"
+RESULT_HINTS = "Y  details    X / O  open report    N  test another    C  compare    Esc  quit"
 DETAILS_HINTS = "Up/Down  page    Y / B  back    Esc  quit"
 DETAILS_TOP = 112
 DETAILS_BOTTOM = 486
@@ -166,6 +175,17 @@ def _keys_text(
         if rest:
             text(s, rest, (x, y), size, colour)
             x += _width(rest, size)
+
+
+def end_card_waits(outcome: Outcome) -> bool:
+    """True when the end card stays up until A, instead of moving on by itself."""
+    return outcome.status != "voided" and len(outcome.lines) > END_AUTO_LINES
+
+
+def _gate_hint(gate: str, b_is_input: bool = False) -> str:
+    """Said once a gate has waited a while, so a dead input doesn't leave the user stuck."""
+    skip = "S skips this check" if b_is_input else "B skips this check"
+    return f"No input from {gate_short(gate)} yet. {skip}, and Space starts it."
 
 
 def waiting(s: pygame.Surface, error: str) -> None:
@@ -287,10 +307,20 @@ def results(
             text(s, str(run_dir), (MARGIN, 120), 20, GREY)
         return
     colour = VERDICT_COLOURS.get(score.verdict, GREY)
-    text(s, f"{label_name}: {score.verdict}", (MARGIN, 70), 36, colour)
+    verdict = f"{label_name}: {score.verdict}"
+    text(s, verdict, (MARGIN, 70), 36, colour)
+    right = WIDTH - MARGIN
     if score.overall is not None:
         overall = f"Overall {score.overall:.0f}"
-        text(s, overall, (WIDTH - MARGIN - _width(overall, 36), 70), 36, colour)
+        right -= _width(overall, 36)
+        text(s, overall, (right, 70), 36, colour)
+    skipped = [e["title"] for e in checks.values() if e.get("status") != "done"]
+    if skipped:
+        # Said beside the verdict, because a verdict covers only the checks that ran.
+        short = f", {len(skipped)} check{'s' if len(skipped) != 1 else ''} not done"
+        x = MARGIN + _width(verdict, 36)
+        if x + _width(short, 28) < right - 16:
+            text(s, short, (x, 76), 28, colour)
     text(s, score.summary, (MARGIN, 108), 22, GREY)
     if run_dir is not None:
         report_path = str(run_dir / "report.html")
@@ -336,7 +366,6 @@ def results(
 
     # Notes, skipped checks, then the honest limits, above the keys.
     notes += score.notes
-    skipped = [e["title"] for e in checks.values() if e.get("status") != "done"]
     if len(skipped) > SKIPPED_NAMED:
         notes.append(f"Not done: {len(skipped)} of {len(checks)} checks.")
     elif skipped:
@@ -435,10 +464,12 @@ def start(
     total: int,
     gate: str | None,
     snap: Snapshot | None,
+    waited: bool = False,
 ) -> None:
     """The full-screen start of a check: what it is, what to do, and the input that starts it.
 
     The check starts only when that same input is pressed, then everything is let go.
+    With `waited`, the gate has seen no input for a while, so a hint says how to move on.
     """
     prompt = gate_prompt(gate) if gate else "Press A to start"
     _frame(s, 5, prompt, START_HINTS_PREVIOUS if index > 0 else START_HINTS)
@@ -449,7 +480,9 @@ def start(
     for line in _wrap(about, 26, WIDTH - 2 * MARGIN)[:3]:
         text(s, line, (MARGIN, y), 26)
         y += 30
-    if gate:
+    if gate and waited:
+        text(s, _gate_hint(gate), (MARGIN, y + 4), 24, INTRO_COLOUR)
+    elif gate:
         text(s, f"Uses {gate_name(gate)}.", (MARGIN, y + 4), 24, GREY)
     if snap is not None:
         draw_controller(s, VIEW_ORIGIN, snap, gate if gate and "+" not in gate else None)
@@ -468,6 +501,7 @@ def check(
     elapsed: float,
     snap: Snapshot | None,
     b_is_input: bool = False,
+    waited: bool = False,
 ) -> None:
     """A running check. For a timing check this is drawn once per phase or gate change, and
     only the bar refreshes in between.
@@ -475,6 +509,7 @@ def check(
     While `gate` is set, the phase waits for that input, and a gate card replaces the
     prompt. `elapsed` is how long the phase has been counting, which moves a tracking
     target. With `b_is_input`, B is part of the phase, so the hints offer only S to skip.
+    With `waited`, a gate has seen no input for a while, so a hint says how to move on.
     """
     if phase.answer and gate is None:
         _frame(s, 5, "A  Yes", "B  No    S  skip    Esc  quit")
@@ -490,6 +525,8 @@ def check(
         heading = phase.intro or f"Now {gate_name(gate)}"
         text(s, heading, (MARGIN, 112), 44, INTRO_COLOUR)
         text(s, f"{gate_prompt(gate)}, then let go.", (MARGIN, 165), 26, GREY)
+        if waited:
+            text(s, _gate_hint(gate, b_is_input), (MARGIN, 194), 24, INTRO_COLOUR)
         _visual(s, phase, 0.0, snap)
         return
     text(s, phase.prompt, (MARGIN, 112), 36)
@@ -608,7 +645,10 @@ def check_end(
             x, y = MARGIN + (i % 2) * 440, 210 + (i // 2) * 30
             text(s, name.replace("_", " "), (x, y), 22, GREY)
             text(s, _metric_text(value), (x + 230, y), 22)
-    if not voided:
+    if end_card_waits(outcome):
+        after = "Results" if last else "the next check"
+        text(s, f"Press A for {after}", (MARGIN, 450), 24, GREY)
+    elif not voided:
         after = "Results" if last else "Next check"
         text(s, f"{after} in {seconds_left:.0f} s", (MARGIN, 450), 24, GREY)
 

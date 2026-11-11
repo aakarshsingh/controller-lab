@@ -101,6 +101,9 @@ Every run is saved here:
       samples\<check>.csv           raw timestamped input for each check
 ```
 
+On the Results screen, X on the controller or `O` on the keyboard opens the run's
+`report.html`. Results stay on screen if the controller is turned off or unplugged.
+
 Press `C` on the Results screen to write `compare.html` and open it. It ranks the
 controllers, shows a table per category, USB against Bluetooth, and overlaid stick
 circles. Both HTML files are single files you can copy anywhere. Neither shows a

@@ -234,6 +234,12 @@ def build_report(run_dir: Path, metrics: dict[str, Any]) -> str:
     head = f"<h1>{_e(label)}: <span class='{cls}'>{_e(verdict)}</span>"
     if overall is not None:
         head += f" <span class='{cls}'>· overall {overall:.0f}</span>"
+    checks = metrics.get("checks") or {}
+    not_done = sum(1 for e in checks.values() if (e or {}).get("status") != "done")
+    if not_done:
+        head += (
+            f" <span class='muted'>· {not_done} check{'s' if not_done != 1 else ''} not done</span>"
+        )
     head += "</h1>"
     meta_fields = (
         ("Started", "started_at"),
