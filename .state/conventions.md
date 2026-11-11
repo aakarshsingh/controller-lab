@@ -147,7 +147,10 @@
 - Maintainer rig: Windows 11, three Series pads labelled Black, White and Red,
   connected over USB-C and Bluetooth. There is no Xbox Wireless Adapter.
 - Verified in Phase 0: uv-managed CPython 3.12.16 runs pygame-ce 2.5.8 with
-  SDL 2.32.10, so the 3.12 pin works.
+  SDL 2.32.10. On 2026-11-08 the pin moved to 3.15.2, which runs the same pygame-ce
+  and SDL, numpy 2.5.4 and matplotlib 3.11.2. The loop times the same on 3.12 and
+  3.15. numpy 2.5 needs Python 3.12 or later, so on 3.11 the lock falls back to numpy
+  2.4.6.
 - The wheel `include` list in `pyproject.toml` names `**/*.py` and
   `profiles/*.toml`. Any other data file inside the package must be added there,
   or it won't ship.
@@ -183,3 +186,14 @@
   browser. Use forward slashes in a `BROWSER` override. Headless Edge,
   `msedge --headless=new --user-data-dir=<scratch> --screenshot=<png> file:///...`,
   captures HTML pages without opening a window.
+- Hand runs, Phase 8: a scratch `PrintWindow` capture once a second while the
+  architect drives gives screen evidence. Deduplicate on the title and prompt rows,
+  or countdowns and the live view make every frame unique. Switching to the
+  terminal to send a message steals focus and voids the running check.
+- Over Bluetooth LE, a controller whose batteries are pulled takes several seconds
+  to show as removed. Not measured. Black over USB gave circle errors of 6.05% left
+  and 5.92% right on a second hand run.
+- Resting offset varies between runs on the same stick. Black's left stick read 1.8%,
+  3.4% and 9.5% at rest on 2026-11-07 and 08, each from a single sample, because
+  XInput sends no change while the stick is still. One reading can trip the 8% idle
+  auto-fail.
