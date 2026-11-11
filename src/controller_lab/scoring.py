@@ -570,6 +570,13 @@ def _auto_fails(
     out: list[str],
 ) -> None:
     limits = profile.auto_fail
+    # An input the person reported as dead counts whatever became of the rest of its check.
+    for entry in (run.get("checks") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for name in (entry.get("metrics") or {}).get("unresponsive") or []:
+            title = entry.get("title", "a check")
+            out.append(f"{name[:1].upper()}{name[1:]} didn't respond, as reported in {title}")
     for side in ("left", "right"):
         offset = values.get(f"idle_drift.{side}_offset_pct")
         if _finite(offset) and offset > limits["idle_offset_pct"]:

@@ -61,6 +61,7 @@ STATUS_TEXT = {
     "voided": ("Voided", RED),
     "not_tested": ("Not tested", GREY),
     "interrupted": ("Interrupted", RED),
+    "unresponsive": ("No response", RED),
 }
 CHECK_HINTS = "B / S  skip    R  redo    Esc  quit"
 # In a phase that tests B, B is input, so only S skips.
@@ -184,8 +185,8 @@ def end_card_waits(outcome: Outcome) -> bool:
 
 def _gate_hint(gate: str, b_is_input: bool = False) -> str:
     """Said once a gate has waited a while, so a dead input doesn't leave the user stuck."""
-    skip = "S skips this check" if b_is_input else "B skips this check"
-    return f"No input from {gate_short(gate)} yet. {skip}, and Space starts it."
+    skip = "S skips" if b_is_input else "B skips"
+    return f"No input from {gate_short(gate)} yet. Y if it doesn't respond. {skip} this check."
 
 
 def waiting(s: pygame.Surface, error: str) -> None:

@@ -22,6 +22,10 @@ B goes back before the checks and skips during them. On the keyboard, `Space` or
 `Enter` continue, `S` skips, `R` redoes, `Backspace` goes back, and `Esc` quits after a
 second press.
 
+Each check starts when you press the input it tests. If that input does nothing, a hint
+appears after 10 s. Press Y there to report it as not responding, which counts as a
+fault, or B to skip the check.
+
 ## One controller at a time
 
 Attach only the controller you're testing. With two attached, the app waits on "Connect

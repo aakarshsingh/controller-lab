@@ -277,3 +277,20 @@ def test_mann_whitney_finds_identical_distributions_not_significant():
     a = np.array([3.1, 2.7, 3.4, 2.9, 3.0, 3.3, 2.8, 3.2])
     _, p = mann_whitney(a, a.copy())
     assert p > 0.05
+
+
+def test_settle_is_read_after_the_last_push_not_into_the_next_one():
+    # Seen in a hand run: the stick rested at 2.8%, and a second push began 265 ms after
+    # the first release. Reading 300 ms after the first release gave 31%.
+    rest = 0.028 * FULL
+    t = np.array([0, 100, 200, 210, 234, 463, 489, 497, 520, 700, 710, 734, 1100]) * MS
+    x = np.array([0, FULL, FULL, 0.15 * FULL, rest, rest, 0.16 * FULL, 0.31 * FULL, FULL])
+    x = np.concatenate([x, [FULL, 0.15 * FULL, rest, rest]])
+    settle_pct, _ = snapback(t, x, np.zeros_like(x))
+    assert abs(settle_pct - 2.8) < 0.01
+
+
+def test_a_push_still_under_way_at_the_settle_mark_is_not_a_reading():
+    t = np.array([0, 100, 200, 210, 400, 520]) * MS
+    x = np.array([0, FULL, FULL, 0.1 * FULL, 0.5 * FULL, 0.6 * FULL])
+    assert snapback(t, x, np.zeros_like(x)) is None

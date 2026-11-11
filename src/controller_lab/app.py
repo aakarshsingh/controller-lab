@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 import webbrowser
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -24,6 +24,7 @@ from controller_lab.checks.base import (
     Outcome,
     Phase,
     at_rest,
+    gate_name,
     gate_pressed,
     phase_gate,
     uses_b,
@@ -165,6 +166,8 @@ class App:
         self.gate_seen_up = False
         self.gate_armed_at: int | None = None
         self.gate_since = 0
+        # Gate inputs the person reported as dead during the check in progress.
+        self.unresponsive: list[str] = []
         self.drawn_key: tuple[int, int, bool, bool] | None = None
         self.nav_armed = False
         # The Results details page: its page, or None while it's closed.
@@ -345,6 +348,12 @@ class App:
 
     def act_run(self, action: str) -> None:
         state = self.state
+        if action == "details" and state in (Screen.START, Screen.CHECK):
+            # Y at a gate that has waited says its input doesn't respond.
+            now = time.perf_counter_ns()
+            if self.gate_waited(now):
+                self.mark_unresponsive(now)
+            return
         if state == Screen.START:
             if action == "continue":
                 self.arm_gate()
@@ -461,11 +470,10 @@ class App:
                 self.interrupt("one_only")
             elif self.gamepad is None:
                 self.reconnect(device_index)
+        elif self.state == Screen.RESULTS:
+            self.results_devices()
         elif controller.get_count() > 1:
             self.block_extra()
-        elif self.gamepad is None and self.state == Screen.RESULTS:
-            # Results stay up until the user moves on. Open the controller so its A works.
-            self.open_gamepad(device_index)
         elif self.gamepad is None:
             self.connect(device_index)
 
@@ -481,10 +489,11 @@ class App:
                 elif count == 0:
                     self.pause_reason = "removed"
                     self.last_frame = 0
-        elif ours and self.state == Screen.RESULTS:
+        elif self.state == Screen.RESULTS:
             # Turning the controller off after a run keeps its Results on screen.
-            self.disconnect()
-            self.last_frame = 0
+            if ours:
+                self.disconnect()
+            self.results_devices()
         elif ours:
             self.disconnect()
             self.go(Screen.WAITING)
@@ -492,6 +501,17 @@ class App:
             self.go(Screen.WAITING)
             if controller.get_count() == 1:
                 self.connect(0)
+
+    def results_devices(self) -> None:
+        """Results stay up until the user moves on, whatever is plugged in or out. A
+        controller is held open, so its A works, only while exactly one is attached. A
+        cable going back in shows two for a moment, and that must not clear the screen."""
+        count = controller.get_count()
+        if count == 1 and self.gamepad is None:
+            self.open_gamepad(0)
+        elif count != 1 and self.gamepad is not None:
+            self.disconnect()
+        self.last_frame = 0
 
     def block_extra(self) -> None:
         """More than one controller is attached: test nothing until one is left."""
@@ -665,6 +685,7 @@ class App:
         self.recorder = None
         self.phase_index = 0
         self.outcome = None
+        self.unresponsive = []
         self.set_gate(phase_gate(check, 0))
         self.go(Screen.START)
 
@@ -698,6 +719,41 @@ class App:
                 self.gate_armed_at = now
             return False
         return at_rest(snap) or now - self.gate_armed_at >= REST_WAIT_NS
+
+    def mark_unresponsive(self, now: int) -> None:
+        """The person says the gate's input does nothing. Software can't tell a dead input
+        from an absent person, so it is their call. It becomes an auto-fail in the score.
+
+        On a start screen the check can't run, so it ends there. Midway, the phases that
+        input drives pass with no data, and the check carries on or finishes.
+        """
+        assert self.gate is not None
+        self.unresponsive.append(gate_name(self.gate))
+        if self.state == Screen.START:
+            self.record(
+                Outcome(
+                    "unresponsive",
+                    {"unresponsive": list(self.unresponsive)},
+                    f"No response from {gate_name(self.gate)}",
+                )
+            )
+            self.save_run_metrics()
+            self.advance()
+            return
+        phases = self.check.phases
+        self.set_gate(None)
+        self.counting_starts.append(now)
+        while True:
+            self.phase_index += 1
+            if self.phase_index == len(phases):
+                self.finish_check(now, timed_out=False)
+                return
+            if phase_gate(self.check, self.phase_index) is not None:
+                self.start_phase(now)
+                self.last_frame = 0
+                return
+            self.phase_starts.append(now)
+            self.counting_starts.append(now)
 
     def tick_start(self, now: int) -> None:
         if self.gate_passed(now):
@@ -788,6 +844,13 @@ class App:
             answers=tuple(self.answers.get(i) for i in range(len(self.check.phases))),
         )
         self.outcome = self.check.analyse(data)
+        if self.unresponsive:
+            said = tuple(f"No response from {name}, as you reported" for name in self.unresponsive)
+            self.outcome = replace(
+                self.outcome,
+                metrics={**self.outcome.metrics, "unresponsive": list(self.unresponsive)},
+                lines=said + self.outcome.lines,
+            )
         self.save_samples(data)
         self.record(self.outcome)
         self.save_run_metrics()

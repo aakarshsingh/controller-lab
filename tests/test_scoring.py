@@ -240,3 +240,15 @@ def test_a_rest_over_the_limit_but_inside_the_deadzone_agrees_with_the_verdict()
     assert "over the 8% limit that marks a fault" in first
     assert "retest to confirm" in first
     assert "may grow into drift" not in first
+
+
+def test_an_input_reported_as_not_responding_is_faulty_whatever_the_check_became():
+    for status in ("unresponsive", "skipped", "done"):
+        entry = {
+            "title": "Skill flicks",
+            "status": status,
+            "metrics": {"unresponsive": ["the right stick"]},
+        }
+        result = score_run(run({"skill_flicks": entry}), SERIES)
+        assert result.verdict == "Faulty"
+        assert result.auto_fails == ["The right stick didn't respond, as reported in Skill flicks"]

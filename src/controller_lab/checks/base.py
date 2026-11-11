@@ -11,7 +11,8 @@ import numpy as np
 
 # (lx, ly, rx, ry, lt, rt, buttons), as `source.Gamepad.snapshot()` returns it.
 Snapshot = tuple[int, ...]
-Status = Literal["done", "skipped", "voided", "not_tested", "interrupted"]
+# `unresponsive` means the person said the input that starts the check did nothing.
+Status = Literal["done", "skipped", "voided", "not_tested", "interrupted", "unresponsive"]
 # Called on every loop pass with the time in ns and the latest snapshot.
 EndCondition = Callable[[int, Snapshot], bool]
 

@@ -212,27 +212,35 @@ def snapback(
 ) -> tuple[float, float] | None:
     """Settle offset and opposite-direction spike for one push, both as % of full.
 
-    The push direction is where the stick was furthest out. Release is the first
-    sample after that back inside 30%. The spike is the furthest the stick swings
-    past centre the other way within `settle_ns`, and the settle offset is where it
-    rests `settle_ns` after release. None when the push or release didn't happen.
+    The series can hold more than one push, when the person pushes again before the
+    stick has rested. Only the last push counts, because a reading taken after an
+    earlier one would catch the next push on its way out. The push direction is where
+    the stick was furthest out in that push. Release is the first sample after it back
+    inside 30%. The spike is the furthest the stick swings past centre the other way
+    within `settle_ns`, and the settle offset is where it rests `settle_ns` after
+    release. None when the push or release didn't happen, or when the stick was back
+    outside 30% by then, which is a push and not a rest.
     """
     t = np.asarray(t_ns, dtype=np.int64)
     xf, yf = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
     r = np.hypot(xf, yf)
-    if r.size == 0:
+    pushed = np.flatnonzero(r >= PUSH_RADIUS * AXIS_MAX)
+    if pushed.size == 0:
         return None
-    peak = int(np.argmax(r))
-    if r[peak] < PUSH_RADIUS * AXIS_MAX:
-        return None
-    after = np.flatnonzero(r[peak:] < RELEASE_RADIUS * AXIS_MAX)
+    last = int(pushed[-1])
+    inside = np.flatnonzero(r[:last] < RELEASE_RADIUS * AXIS_MAX)
+    begin = int(inside[-1]) + 1 if inside.size else 0
+    peak = begin + int(np.argmax(r[begin : last + 1]))
+    after = np.flatnonzero(r[last:] < RELEASE_RADIUS * AXIS_MAX)
     if after.size == 0:
         return None
-    rel = peak + int(after[0])
+    rel = last + int(after[0])
     ux, uy = xf[peak] / r[peak], yf[peak] / r[peak]
     window = (t >= t[rel]) & (t <= t[rel] + settle_ns)
     spike = max(0.0, float(np.max(-(xf[window] * ux + yf[window] * uy))))
     settle = int(np.searchsorted(t, t[rel] + settle_ns, side="right")) - 1
+    if r[settle] >= RELEASE_RADIUS * AXIS_MAX:
+        return None
     return float(r[settle]) / AXIS_MAX * 100, spike / AXIS_MAX * 100
 
 

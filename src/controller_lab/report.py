@@ -30,6 +30,7 @@ METRICS_FILE = "metrics.json"
 HIDDEN_FIELDS = ("device_key", "guid")
 MARGIN_POINTS = 5.0  # overall scores this close count as the same
 LIST_PREVIEW = 8
+NOT_COUNTED = "incomplete, not counted"
 COLOURS = ("#2b7de1", "#e24036", "#60b946", "#f6c520", "#9b59b6", "#e67e22", "#16a085")
 ROTATE_TIP = (
     "Tip: test the controllers in a rotating order, such as Black, White, Red and then "
@@ -348,9 +349,17 @@ class Group:
         return statistics.median(values) if values else None
 
 
+def _finished(run: Run) -> bool:
+    """A run that reached Results has a saved score. One that was abandoned doesn't."""
+    return bool(run.metrics.get("score"))
+
+
 def _groups(runs: list[Run]) -> list[Group]:
+    """Group the finished runs. An abandoned run measured too little to rank."""
     groups: dict[tuple[str, str], Group] = {}
     for run in runs:
+        if not _finished(run):
+            continue
         ctype = run.metrics.get("type", "")
         profile = scoring.load_profile(scoring.profile_for(ctype))
         # Bluetooth is judged again against every other controller's Bluetooth runs.
@@ -377,9 +386,10 @@ def _ranking(groups: list[Group]) -> str:
                 _e(_score_text(overall)),
                 f"<span class='{cls}'>{_e(latest)}</span>",
                 str(len(g.runs)),
+                _e(", ".join(sorted({str(r.metrics.get("suite", "?")) for r in g.runs}))),
             ]
         )
-    head = ["Rank", "Controller", "Connection", "Median overall", "Latest verdict", "Runs"]
+    head = ["Rank", "Controller", "Connection", "Median overall", "Latest verdict", "Runs", "Suite"]
     return "<h2>Ranking</h2>" + _table(head, rows)
 
 
@@ -544,7 +554,7 @@ def _versions(runs: list[Run], groups: list[Group]) -> str:
             _e(r.metrics.get("tool_version", "?")),
             _e(f"{r.metrics.get('profile', '?')} v{r.metrics.get('profile_version', '?')}"),
             _e(r.metrics.get("backend", "?")),
-            _e(verdicts.get(id(r), "?")),
+            _e(verdicts.get(id(r), NOT_COUNTED)),
         ]
         for r in runs
     ]
@@ -560,8 +570,20 @@ def build_compare(runs: list[Run]) -> str:
         )
         return _page("Controller Lab: compare", body)
     groups = _groups(runs)
+    if not groups:
+        body = (
+            "<h1>Compare</h1><p>No run has finished yet, so there is nothing to compare. "
+            "A run counts once it reaches Results.</p>" + _versions(runs, groups)
+        )
+        return _page("Controller Lab: compare", body)
     context = scoring.load_profile("xbox_series").bluetooth_context
     count = f"{len(runs)} runs of {len({r.label for r in runs})} controllers on this PC."
+    unfinished = sum(1 for r in runs if not _finished(r))
+    if unfinished:
+        count += (
+            f" {unfinished} stopped before Results, so {'they are' if unfinished != 1 else 'it is'}"
+            " listed under Runs but not counted."
+        )
     body = [
         "<h1>Compare</h1>",
         f"<p class='muted'>{count}</p>",
