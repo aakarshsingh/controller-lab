@@ -2,7 +2,7 @@
 # (100) to `bad` (0), clamped. Values are first estimates from Gamepadla's figures
 # and the maintainer's runs, and Phase 8 calibrates them.
 
-version = 1
+version = 2
 name = "Xbox Series"
 calibrated = true
 bluetooth_bad_ratio = 1.5
@@ -281,6 +281,13 @@ source = "holds.dropouts_total"
 category = "buttons"
 good = 0.0
 bad = 1.0
+
+[[metric]]
+name = "holds_not_held"
+source = "holds.not_held"
+category = "buttons"
+good = 0.0
+bad = 2.0
 
 # ---- D-pad ------------------------------------------------------------------
 

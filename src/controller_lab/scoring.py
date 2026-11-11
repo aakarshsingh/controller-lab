@@ -30,6 +30,13 @@ MINOR_BELOW = 80
 # A Bluetooth value within 10% of the PC's reference is not flagged as a cause.
 BLUETOOTH_MARGIN = 1.1
 TAPS = 20
+# How the button taps check's metric keys read in an issue line.
+BUTTON_TITLES = {
+    "Back": "View",
+    "Start": "Menu",
+    "LS": "The left stick click",
+    "RS": "The right stick click",
+}
 
 BLUETOOTH_NOT_TESTED = "not tested: needs another controller tested over Bluetooth on this PC"
 NOT_CALIBRATED = "This controller type's reference isn't calibrated, so treat scores as rough."
@@ -246,7 +253,9 @@ def _values(checks: dict[str, Any]) -> dict[str, Any]:
     if reaches:
         derived["sprint_min_reach_pct"] = min(reaches)
     counts = [v for k, v in values.items() if k.startswith("button_taps.") and k.endswith("_count")]
-    tapped = [abs(c - TAPS) for c in counts if _finite(c) and c > 0]
+    # A count of 0 stays in: a tap phase only ends at 0 when nothing registered for its
+    # whole timeout, and a check with no presses at all is skipped, never scored.
+    tapped = [abs(c - TAPS) for c in counts if _finite(c)]
     if tapped:
         derived["button_count_error"] = max(tapped)
     expected = values.get("dpad.diagonals_expected")
@@ -303,7 +312,11 @@ def _issue(m: MetricDef, value: float, score: float, values: dict[str, Any]) -> 
         "rt_sag": f"RT sagged below 95% while held, {_n(value, 'time')}",
         "throttle_jitter": f"RT wobbles when held part way ({value:.2f}% jitter)",
         "stray_presses": f"Buttons registered {_n(value, 'stray press', 'stray presses')} at rest",
-        "tap_count_error": f"A button missed or added up to {value:.0f} of {TAPS} taps",
+        "tap_count_error": "A button registered none of its taps"
+        if value >= TAPS
+        else f"A button missed or added up to {value:.0f} of {TAPS} taps",
+        "holds_not_held": "Never registered as fully held: "
+        + ", ".join(values.get("holds.not_held_labels") or ["a hold"]),
         "tap_chatter": f"Buttons chattered {_n(value, 'time')}, a press registering twice",
         "hold_dropouts": f"Held buttons dropped out {_n(value, 'time')}",
         "dpad_ghosts": f"The D-pad fired a neighbouring direction {_n(value, 'time')}",
@@ -342,6 +355,7 @@ MEANING = {
     "tap_count_error": "a button missed or added taps",
     "tap_chatter": "a single press sometimes registered twice",
     "hold_dropouts": "a held input briefly let go",
+    "holds_not_held": "a hold never registered, so one of its inputs may not be working",
     "dpad_ghosts": "the D-pad sometimes fires a neighbouring direction",
     "dpad_diagonals": "the D-pad doesn't always register diagonals",
     "usb_mean": "input arrives later than on a healthy controller over USB",
@@ -369,8 +383,9 @@ def _stick_rest(side: str, values: dict[str, Any], profile: Profile) -> str | No
         return f"{rest}, past the game deadzone of {dz:.1f}%, so games will see drift."
     if offset > limit:
         return (
-            f"{rest}, inside the game deadzone of {dz:.1f}% but over the {limit:.0f}% limit,"
-            " so it may grow into drift. Retest once to rule out where it came to rest."
+            f"{rest}, over the {limit:.0f}% limit that marks a fault, though inside the game"
+            f" deadzone of {dz:.1f}%, so games won't see it yet. It comes from one resting"
+            " position, so retest to confirm."
         )
     return f"{rest}, inside the game deadzone of {dz:.1f}%, so games won't see it."
 
@@ -568,6 +583,10 @@ def _auto_fails(
                 f"{side.capitalize()} stick stopped {settle:.0f}% off centre after a push, "
                 f"over the {limits['settle_offset_pct']:.0f}% limit"
             )
+    for key, count in values.items():
+        if key.startswith("button_taps.") and key.endswith("_count") and count == 0:
+            name = key.removeprefix("button_taps.").removesuffix("_count")
+            out.append(f"{BUTTON_TITLES.get(name, name)} never registered a press when tapped")
     chatter = values.get("button_taps.chatter_total")
     if _finite(chatter) and chatter > limits["chatter"]:
         out.append("A button chattered, registering one press twice")

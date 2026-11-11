@@ -72,9 +72,10 @@ run didn't measure show "not tested" and don't count.
 
 - Timing is when Windows receives the input, not true end-to-end latency.
 - A constant delay added by the connection can't be detected by software.
-- Checks that depend on the person, tracking and throttle steadiness, are left out of a
-  single controller's score. They only count in compare, and only as significant with at
-  least 2 runs per controller.
+- Tracking depends on the person, so it is left out of a single controller's score. It
+  only counts in compare, along with how steady RT stays across the throttle hold, and
+  only as significant with at least 2 runs per controller. RT's fast wobble while held
+  part way does count, under Triggers.
 
 ## How Bluetooth is judged
 

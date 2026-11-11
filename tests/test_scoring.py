@@ -195,3 +195,48 @@ def test_a_rest_offset_inside_the_deadzone_says_games_wont_see_it():
     assert "4.0% left" in first
     assert "26.5%" in first
     assert "games won't see it" in first
+
+
+def taps(**counts):
+    full = dict.fromkeys(("A", "B", "X", "Y", "LB", "RB", "Back", "Start", "LS", "RS"), 20)
+    metrics = {f"{k}_count": v for k, v in (full | counts).items()} | {"chatter_total": 0}
+    return {"status": "done", "metrics": metrics}
+
+
+def test_a_button_that_never_registers_a_tap_is_faulty_and_named():
+    result = score_run(run({"button_taps": taps(X=0, Back=0)}), SERIES)
+    assert result.verdict == "Faulty"
+    assert "X never registered a press when tapped" in result.auto_fails
+    assert "View never registered a press when tapped" in result.auto_fails
+    assert "A button registered none of its taps" in result.issues
+    assert score_run(run({"button_taps": taps()}), SERIES).verdict == "Healthy"
+
+
+def test_a_skipped_tap_check_with_no_presses_is_not_scored():
+    skipped = taps(
+        **dict.fromkeys(("A", "B", "X", "Y", "LB", "RB", "Back", "Start", "LS", "RS"), 0)
+    )
+    skipped["status"] = "skipped"
+    result = score_run(run({"button_taps": skipped}), SERIES)
+    assert result.auto_fails == []
+    assert result.verdict == "Not tested"
+
+
+def test_a_hold_that_never_registered_is_an_issue_naming_it():
+    holds = {
+        "status": "done",
+        "metrics": {"dropouts_total": 0, "not_held": 1, "not_held_labels": ["RB + X"]},
+    }
+    result = score_run(run({"holds": holds}), SERIES)
+    assert "Never registered as fully held: RB + X" in result.issues
+    assert result.auto_fails == []
+    assert result.categories["buttons"].score == pytest.approx(75)
+
+
+def test_a_rest_over_the_limit_but_inside_the_deadzone_agrees_with_the_verdict():
+    result = score_run(run({"idle_drift": idle_full(left=9.5)}), SERIES)
+    first = result.inferences["left_stick"][0]
+    assert result.verdict == "Faulty"
+    assert "over the 8% limit that marks a fault" in first
+    assert "retest to confirm" in first
+    assert "may grow into drift" not in first

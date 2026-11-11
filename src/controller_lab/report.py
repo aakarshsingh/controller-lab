@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from controller_lab import analysis, scoring
+from controller_lab.checks.report_timing import WINDOW_S
 
 REPORT_FILE = "report.html"
 COMPARE_FILE = "compare.html"
@@ -162,7 +163,7 @@ def _interval_plot(run_dir: Path) -> str:
     start = analysis.motion_start(s[:, 0], s[:, 1])
     if start is None:
         return "<p class='muted'>The stick didn't move during report timing.</p>"
-    end = int(np.searchsorted(t, t[start] + 15 * 10**9, side="right"))
+    end = int(np.searchsorted(t, t[start] + WINDOW_S * 10**9, side="right"))
     tt, x, y = t[start:end], s[start:end, 0], s[start:end, 1]
     still = analysis.still_mask(tt, x, y)
     ms = analysis.intervals(tt, np.empty((0, 2), dtype=np.int64), exclude=still) / 1e6

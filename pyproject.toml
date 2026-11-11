@@ -1,7 +1,7 @@
 [project]
 name = "controller-lab"
 version = "0.1.0"
-description = "A guided controller tester for Windows that gives an honest verdict per pad."
+description = "A guided controller tester for Windows that gives an honest verdict per controller."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

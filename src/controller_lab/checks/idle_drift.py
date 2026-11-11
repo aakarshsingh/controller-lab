@@ -17,7 +17,9 @@ def analyse(data: CheckData) -> Outcome:
     t, s = data.t_ns[rows], data.samples[rows]
     if t.size == 0 or len(data.phase_starts_ns) < len(PHASES):
         return Outcome("voided", message="No samples were recorded, A to redo")
-    held = np.diff(np.append(t, data.end_ns)).astype(np.float64)
+    # The first row is the state held when the rest began, so it counts from there.
+    counting = data.counting_starts_ns or data.phase_starts_ns
+    held = np.diff(np.append(np.maximum(t, counting[-1]), data.end_ns)).astype(np.float64)
     metrics: dict[str, object] = {}
     lines: list[str] = []
     for side, (xi, yi) in (("left", (0, 1)), ("right", (2, 3))):

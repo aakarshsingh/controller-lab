@@ -199,6 +199,7 @@ SETTLE_NS = 300 * NS_PER_MS
 RIM_RADIUS = 0.5  # circle samples inside this are ignored
 CIRCLE_BIN_DEG = 5
 AXIS_WINDOW_DEG = 10
+TRIGGER_SQUEEZE = 0.1  # a trigger past this is being squeezed, not resting
 
 
 def _angles(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -296,12 +297,20 @@ def sweep_stats(values: np.ndarray) -> tuple[int, int, float]:
 
 
 def trigger_stats(values: np.ndarray) -> tuple[int, float, int, float]:
-    """Rest value, max reach in %, distinct values, and the max jump in %."""
+    """Rest value, max reach in %, distinct values, and the max jump in %.
+
+    The rest value is the lowest reading before the first squeeze. The first reading
+    alone can catch the trigger still on its way back from the press that started
+    the phase.
+    """
     v = np.asarray(values, dtype=np.int64)
     if v.size == 0:
         return 0, float("nan"), 0, float("nan")
+    squeezed = np.flatnonzero(v > TRIGGER_SQUEEZE * AXIS_MAX)
+    before = v[: squeezed[0]] if squeezed.size else v
+    rest = int(before.min()) if before.size else int(v[0])
     jump = float(np.abs(np.diff(v)).max()) / AXIS_MAX * 100 if v.size > 1 else 0.0
-    return int(v[0]), float(v.max()) / AXIS_MAX * 100, int(np.unique(v).size), jump
+    return rest, float(v.max()) / AXIS_MAX * 100, int(np.unique(v).size), jump
 
 
 # ---- buttons and D-pad ----------------------------------------------------

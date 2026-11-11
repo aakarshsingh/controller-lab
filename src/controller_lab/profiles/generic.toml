@@ -2,7 +2,7 @@
 # Series values, which are not calibrated for other controllers, so results carry a
 # "reference not calibrated" note.
 
-version = 1
+version = 2
 name = "Generic"
 calibrated = false
 bluetooth_bad_ratio = 1.5
@@ -281,6 +281,13 @@ source = "holds.dropouts_total"
 category = "buttons"
 good = 0.0
 bad = 1.0
+
+[[metric]]
+name = "holds_not_held"
+source = "holds.not_held"
+category = "buttons"
+good = 0.0
+bad = 2.0
 
 # ---- D-pad ------------------------------------------------------------------
 

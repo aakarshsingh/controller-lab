@@ -115,6 +115,7 @@ def analyse(data: CheckData) -> Outcome:
     lines: list[str] = []
     held_any = False
     total = 0
+    not_held: list[str] = []
     for i, hold in enumerate(HOLDS):
         rows = data.phase_rows(i)
         t, s = data.t_ns[rows], data.samples[rows]
@@ -122,6 +123,7 @@ def analyse(data: CheckData) -> Outcome:
         if not full.any():
             metrics[f"{hold.key}_held"] = False
             lines.append(f"{hold.label}: not held")
+            not_held.append(hold.label)
             continue
         held_any = True
         first = int(np.argmax(full))
@@ -131,6 +133,8 @@ def analyse(data: CheckData) -> Outcome:
         metrics[f"{hold.key}_dropouts"] = count
         lines.append(f"{hold.label}: {count} dropout{'s' if count != 1 else ''}")
     metrics["dropouts_total"] = total
+    metrics["not_held"] = len(not_held)
+    metrics["not_held_labels"] = not_held
     if not held_any:
         return Outcome("skipped", metrics, "Nothing was held")
     return Outcome("done", metrics, lines=tuple(lines))

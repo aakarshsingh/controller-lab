@@ -1,4 +1,4 @@
-"""Records timestamped pad state changes and loop-pass durations. No pygame imports."""
+"""Records timestamped controller state changes and loop-pass durations. No pygame imports."""
 
 from __future__ import annotations
 

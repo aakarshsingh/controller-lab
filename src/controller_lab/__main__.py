@@ -3,7 +3,7 @@
 import os
 
 # SDL reads these when the joystick subsystem starts, so they must be set before
-# pygame is imported anywhere. Pads are read through XInput only.
+# pygame is imported anywhere. Controllers are read through XInput only.
 SDL_HINTS = {
     "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS": "1",
     "SDL_JOYSTICK_RAWINPUT": "0",
